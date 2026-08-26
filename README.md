@@ -2,7 +2,9 @@
 
 A local, multi-agent research system that analyzes US equities, Japanese equities (TSE), and major crypto to produce **manual decision-support** for day/swing trading: a scored buy/sell/hold call per ticker with a suggested holding period, profit target, and stop-loss, plus the reasoning behind it. It never places or auto-executes trades — every recommendation is meant to be read by a human and acted on manually.
 
-Status as of 2026-08-26: **planning complete; Phase 0 (environment setup) done; Phase 1 (data layer) underway.** See "Where things stand" below for exactly what's built, tested, and next.
+Status as of 2026-08-26: **planning complete; Phase 0 done; Phase 1 (data layer) and Phase 2 (specialist agents) underway.** See "Where things stand" below for exactly what's built, tested, and next.
+
+**LLM provider note:** the plan originally specced local Ollama as primary. Per direction, this was switched to the **Rakuten AI Gateway (Claude)** instead, reusing the same live-verified client construction as `../Server_failure/rakuten-failure-agent` (gateway auth via header, not `api_key`; no `temperature` param; `max_tokens=128000`; streaming required). Ollama (`qwen2.5:7b`, already pulled locally) is now the configured fallback, not primary. See `agents/llm_client.py`.
 
 ## Read this before anything else
 
@@ -77,4 +79,11 @@ Phase 0 (env setup) → 1 (data layer) → 2 (specialist agents) → 3 (supervis
 - Three **keyless** connectors implemented and verified against live data just now: `us_equities_yfinance.py` (AAPL), `crypto_ccxt.py` (BTC/USDT via Binance public), `jp_equities_yahoo_unofficial.py` (7203.T Toyota).
 - The mandated split-adjustment regression test (`test_us_equities_yfinance.py`) passes against NVDA's real 2024-06-10 10:1 split.
 
-**Not yet built (remaining Phase 1 work):** the ~10 connectors needing API keys/registration (Twelve Data, Tiingo, Alpha Vantage, SEC EDGAR, FINRA short interest, J-Quants, EDINET, Dune Analytics, Etherscan V2) — these need you to register for free accounts first (see `.env.example`); the Parquet/DuckDB analytical store and `state.db`/`news.db` operational store from `section_data_pipeline.md` §2.3; and the ingestion-cadence scheduler jobs. After that: Phase 2 (specialist agents).
+**Not yet built (remaining Phase 1 work):** the ~10 connectors needing API keys/registration (Twelve Data, Tiingo, Alpha Vantage, SEC EDGAR, FINRA short interest, J-Quants, EDINET, Dune Analytics, Etherscan V2) — these need you to register for free accounts first (see `.env.example`); the Parquet/DuckDB analytical store and `state.db`/`news.db` operational store from `section_data_pipeline.md` §2.3; and the ingestion-cadence scheduler jobs.
+
+**Phase 2 (Individual Specialist Agents) — 2 of 8 directional agents done end-to-end:**
+- `agents/llm_client.py` — Rakuten AI Gateway (Claude) client with schema-constrained JSON output and retry-with-repair, tested live against the real gateway.
+- `signals/ta/mean_reversion.py` + `signals/ta/trend_momentum.py` — pure-math signal functions (Bollinger %B, RSI-2, VWAP z-score, MA-vs-MA z-score, ADX/trend_confidence, Donchian, MACD, cross-sectional momentum vs. SPY/TOPIX/BTC), verified against hand-computed fixtures (16 tests).
+- `agents/mean_reversion_agent.py` + `agents/trend_momentum_agent.py` — both run end-to-end against live AAPL/SPY data with a real Rakuten-gateway LLM call for the rationale text. Score/confidence are 100% code-computed — the LLM's output schema has no score field at all, so it structurally cannot influence the number, only explain it.
+
+**Not yet built (remaining Phase 2 work):** signal math + agent wrappers for SeasonalityAgent, ShortSqueezeAgent, VolatilityVolumeAgent, CryptoOnChainAgent, CryptoDerivativesAgent, NewsSentimentAgent (6 of 8 directional agents). After that: Phase 3 (RiskManagerAgent, MarketRegimeAgent, PortfolioSupervisorAgent, and the LangGraph orchestration graph wiring all agents together).
