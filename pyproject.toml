@@ -1,0 +1,43 @@
+[project]
+name = "market-alpha-agents"
+version = "0.1.0"
+description = "Local multi-agent research system for manual stock/crypto day-swing decision support"
+requires-python = ">=3.11"
+dependencies = [
+  "langgraph>=0.2",
+  "langgraph-checkpoint-sqlite>=2.0",
+  "langchain-core>=0.3",
+  "pydantic>=2.7",
+  "pyyaml>=6.0",
+  "python-dotenv>=1.0",
+  "yfinance>=0.2.40",
+  "ccxt>=4.3",
+  "requests>=2.32",
+  "httpx>=0.27",
+  "apscheduler==3.*",
+  "pandas>=2.2",
+  "numpy>=1.26",
+  "duckdb>=1.0",
+  "diskcache>=5.6",
+  "feedparser>=6.0",
+]
+
+[project.optional-dependencies]
+backtesting = [
+  "vectorbt>=0.26",
+  "quantstats>=0.0.62",
+  # freqtrade is intentionally excluded here -- it is opinionated about owning
+  # its own virtualenv and should be installed separately when Phase 4 starts.
+]
+dev = [
+  "pytest>=8.0",
+  "pytest-cov>=5.0",
+]
+
+[tool.setuptools]
+py-modules = []
+
+[tool.pytest.ini_options]
+markers = [
+  "network: test makes real network calls to a live vendor API",
+]

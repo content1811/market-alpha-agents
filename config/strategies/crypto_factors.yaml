@@ -1,0 +1,38 @@
+# CryptoOnChainAgent + CryptoDerivativesAgent tunables.
+# See docs/plan/section_agents.md sections 6-7. On-chain data path corrected
+# post-critique: Glassnode's free tier is gone -- see section_data_pipeline.md
+# section 1 and section_agents.md section 6 for the Dune/CryptoQuant replacement.
+onchain:
+  weights:
+    mvrv_pctile_score: 0.30
+    sopr_score: 0.20
+    flow_score: 0.20
+    whale_score: 0.15
+    addr_divergence: 0.05
+    unlock_penalty: 0.10
+  mvrv_lookback_years: 4
+  mvrv_bands:            # ln(MVRV) percentile bands -> composite score
+    capitulation: {max: 1.0, score: [90, 100]}
+    accumulation: {min: 1.0, max: 2.0, score: [60, 80]}
+    neutral: {min: 2.0, max: 3.5, score: [40, 60]}
+    overheated: {min: 3.5, max: 7.0, score: [10, 30]}
+  exchange_flow_lookback_days: 90
+  exchange_flow_zscore_trigger: 1.5
+  whale_cohort_btc_threshold: 1000
+  whale_lookback_days: [7, 30]
+  unlock_negligible_pct_supply: 1.0
+  unlock_negligible_adv_multiple: 5
+  unlock_severe_pct_supply: 5.0
+  unlock_severe_adv_multiple: 20
+  confidence_cap: 0.6
+derivatives:
+  weights:
+    funding_score: 0.4
+    oi_score: 0.35
+    skew_score: 0.25
+  funding_annualized_crowded_long_pct: 30
+  funding_annualized_extreme_pct: 50
+  funding_zscore_lookback_days: 90
+  skew_zscore_lookback_days: 60
+  skew_zscore_trigger: 1.5
+  liquidation_cluster_stop_tighten_pct: 3.0

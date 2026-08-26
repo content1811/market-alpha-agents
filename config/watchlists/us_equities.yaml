@@ -1,0 +1,11 @@
+# Starter watchlist. Keep this small and liquid while validating the pipeline
+# (Phase 1) -- a big universe multiplies API-budget pressure before anything
+# has proven to work. Per-symbol overrides are optional.
+symbols:
+  - symbol: AAPL
+  - symbol: MSFT
+  - symbol: NVDA
+  - symbol: SPY
+  - symbol: TSLA
+    overrides:
+      atr_stop_multiple_swing: 3.0   # known-volatile name, per section_agents.md guidance

@@ -1,0 +1,19 @@
+# MeanReversionAgent tunables. See docs/plan/section_agents.md section 1 and
+# docs/research/ta.md for the source reasoning behind each default.
+bollinger:
+  lookback: 20
+  k: 2.0
+  regime_filter_adx_max: 20   # only fade bands when ADX below this (avoid fading real breakouts)
+rsi2:
+  lookback: 2
+  oversold: 5
+  overbought: 95
+  trend_filter_ma: 200        # only take long side when price above this SMA
+vwap_reversion:
+  deviation_bands_sigma: [1.0, 2.0]
+  session_reset: true         # intraday only, resets each session
+zscore:
+  lookback: 20
+  entry_threshold: 2.0
+  exit_threshold: 0.5
+  max_holding_days: 10        # time-stop if z-score stays extreme (possible regime change)

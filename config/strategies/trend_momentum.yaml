@@ -1,0 +1,23 @@
+# TrendMomentumAgent tunables. See docs/plan/section_agents.md section 2.
+moving_averages:
+  fast: 20
+  slow: 50
+  golden_cross_fast: 50
+  golden_cross_slow: 200
+adx:
+  lookback: 14
+  trend_cutoff: 25            # ">25 = trending, full weight" per section_agents.md
+  # trend_confidence = clip((ADX - 15) / 10, 0, 1) -- fixed formula, see critique.md #5
+  confidence_formula_offset: 15
+  confidence_formula_scale: 10
+donchian:
+  lookback: 20
+macd:
+  fast: 12
+  slow: 26
+  signal: 9
+cross_sectional_momentum:
+  benchmark_us: SPY
+  benchmark_jp: TOPIX
+  benchmark_crypto: BTC/USDT
+  lookback_days: 63

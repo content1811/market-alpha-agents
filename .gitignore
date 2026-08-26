@@ -3,9 +3,19 @@
 *.env
 config/secrets.*
 
-# local data & caches
-data/*
-!data/.gitkeep
+# local data & caches (source files under data/ -- schema.py, connectors/ -- are NOT excluded)
+data/cache/*
+!data/cache/.gitkeep
+data/raw/
+data/parquet/
+data/*.db
+data/*.parquet
+storage/*.db
+orchestration/checkpoints.db
+logs/*.log
+.pytest_cache/
+.coverage
+htmlcov/
 
 # python
 __pycache__/
@@ -15,6 +25,9 @@ venv/
 
 # node (if any tooling scripts use it)
 node_modules/
+
+# packaging
+*.egg-info/
 
 # OS
 .DS_Store

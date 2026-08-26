@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  NOT YET INSTALLED. This is a template for Phase 6 (Paper-Trading Dry Run),
+  once scripts/run_daily_scan.py exists -- see docs/plan/section_orchestration.md
+  section 3. Installing a launchd agent for a script that doesn't exist yet
+  would just fail silently on every scheduled tick, so this is left as a
+  template to `cp` into ~/Library/LaunchAgents/ and `launchctl load` when that
+  script is ready, not something this setup phase installs automatically.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.marketalpha.dailyrun</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/prabhatkumar.singh/Downloads/experiments/market-alpha-agents/.venv/bin/python</string>
+        <string>/Users/prabhatkumar.singh/Downloads/experiments/market-alpha-agents/scripts/run_daily_scan.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/prabhatkumar.singh/Downloads/experiments/market-alpha-agents</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>16</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/prabhatkumar.singh/Downloads/experiments/market-alpha-agents/logs/daily_scan.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/prabhatkumar.singh/Downloads/experiments/market-alpha-agents/logs/daily_scan.err.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
