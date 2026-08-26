@@ -91,7 +91,7 @@ signal_score = raw_score * (1 - trend_confidence)
 
 **Inputs / data needed.**
 - Daily OHLCV, 252+ day history (same sources as above).
-- For cross-sectional momentum: trailing 252-day total return of the ticker's relevant broad-market proxy — SPY for US equities, TOPIX (`^TOPX`) for JP equities, BTC (or a cap-weighted top-20 crypto index) for altcoins — computable locally from the same cached OHLCV already pulled for the proxy ticker, no extra API. (Superseded design note: an earlier draft percentile-ranked against a small hand-picked watchlist of 20–50 tickers; that inflated conviction because a ticker could rank highly against a self-selected small list while being mediocre against the actual market — see indicator #4 below.)
+- For cross-sectional momentum: trailing 252-day total return of the ticker's relevant broad-market proxy — SPY for US equities, a TOPIX-tracking ETF (`1306.T`) for JP equities (**correction, verified live Aug 2026**: `^TOPX` is not a valid Yahoo Finance symbol and returns a 404; `1306.T` is a real, liquid TOPIX ETF that works), BTC (or a cap-weighted top-20 crypto index) for altcoins — computable locally from the same cached OHLCV already pulled for the proxy ticker, no extra API. (Superseded design note: an earlier draft percentile-ranked against a small hand-picked watchlist of 20–50 tickers; that inflated conviction because a ticker could rank highly against a self-selected small list while being mediocre against the actual market — see indicator #4 below.)
 - ATR(14) for normalization (shared utility, computed once per ticker per day and cached for reuse by other agents).
 
 **Concrete indicators and thresholds.**

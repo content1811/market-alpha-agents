@@ -20,7 +20,7 @@ from signals.market_regime import compute_market_regime
 # proxies TrendMomentumAgent uses for cross-sectional momentum.
 PROXY_BY_ASSET_CLASS = {
     AssetClass.US_EQUITY: "SPY",
-    AssetClass.JP_EQUITY: "^TOPX",
+    AssetClass.JP_EQUITY: "1306.T",  # TOPIX ETF -- "^TOPX" is NOT a valid Yahoo Finance symbol (verified live, 404)
     AssetClass.CRYPTO: "BTC/USDT",
 }
 
