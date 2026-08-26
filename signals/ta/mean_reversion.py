@@ -63,6 +63,39 @@ def vwap_zscore(prices: pd.Series, volumes: pd.Series) -> float:
     return float((prices.iloc[-1] - vwap) / stdev)
 
 
+def mean_reversion_signal_series(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    bb_window: int = 20,
+    bb_k: float = 2.0,
+    z_window: int = 20,
+    sma200_window: int = 200,
+) -> pd.Series:
+    """Vectorized signal_score across every date, for backtesting
+    (backtesting/run_backtest.py) -- the same formula compute_mean_reversion
+    applies to the latest bar only, applied element-wise to the whole
+    history. VWAP sub-score is swing-only here (no intraday session data in a
+    daily-bar backtest), so weights redistribute exactly as
+    compute_mean_reversion does when vwap_z is None."""
+    pct_b = bollinger_pct_b(close, bb_window, bb_k)
+    bb_score = (-(2 * pct_b - 1)).clip(-1.0, 1.0)
+
+    rsi2_val = rsi2(close)
+    sma200 = sma(close, sma200_window)
+    rsi2_score = ((50 - rsi2_val) / 50).clip(-1.0, 1.0).where(close > sma200, 0.0)
+
+    z_ma = zscore_vs_ma(close, z_window)
+    z_score = (-z_ma / 2).clip(-1.0, 1.0)
+
+    raw_score = (bb_score + rsi2_score + z_score) / 3
+
+    adx_series = adx14(high, low, close)
+    tc_series = adx_series.apply(trend_confidence)
+
+    return (raw_score * (1 - tc_series)).clip(-1.0, 1.0)
+
+
 @dataclass
 class MeanReversionSubScores:
     bb_score: float

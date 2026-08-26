@@ -21,6 +21,7 @@ dependencies = [
   "apscheduler==3.*",
   "pandas>=2.2",
   "numpy>=1.26",
+  "scipy>=1.13",
   "duckdb>=1.0",
   "diskcache>=5.6",
   "feedparser>=6.0",
@@ -28,10 +29,20 @@ dependencies = [
 
 [project.optional-dependencies]
 backtesting = [
-  "vectorbt>=0.26",
+  "vectorbt>=1.1",
+  "plotly<7",  # vectorbt 1.1.0 (latest as of Aug 2026) crashes on import against
+               # plotly>=7 -- its bundled theme config references the "scattermapbox"
+               # trace name, which newer plotly renamed to "scattermap". Verified live:
+               # pinning plotly<7 (resolves to 6.9.0) fixes the import cleanly.
   "quantstats>=0.0.62",
+  # bt and zipline-reloaded are intentionally excluded: both lag current Python
+  # support significantly (zipline-reloaded's own dependency chain has a long
+  # history of trailing new CPython releases) -- not verified working on 3.13
+  # here, and not worth the compatibility risk when vectorbt alone covers the
+  # signal-level backtesting this phase actually needs.
   # freqtrade is intentionally excluded here -- it is opinionated about owning
-  # its own virtualenv and should be installed separately when Phase 4 starts.
+  # its own virtualenv and should be installed separately when the crypto leg
+  # of backtesting is built (not done in this pass -- see README).
 ]
 dev = [
   "pytest>=8.0",
