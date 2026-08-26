@@ -58,11 +58,13 @@ class AgentVerdict(BaseModel):
 
 RiskSignal = Literal["approve", "reduce_size", "veto"]
 StructuralFeasibility = Literal["ok", "infeasible_lot_size", "infeasible_margin_floor"]
+JPLimitBandFlag = Literal["none", "approaching_limit", "limit_lock_risk", "stop_outside_band"]
 
 
 class RiskManagerVerdict(BaseModel):
     """RiskManagerAgent (section_agents.md section 9) -- a gate/modifier, never
-    a weighted directional vote."""
+    a weighted directional vote. No LLM call: every field here is deterministic,
+    per the plan's own rules 1-9, so there is nothing for an LLM to interpret."""
 
     risk_signal: RiskSignal
     conviction: float = Field(ge=0.0, le=1.0)
@@ -70,45 +72,59 @@ class RiskManagerVerdict(BaseModel):
     max_position_size_currency: float
     stop_loss_override: Optional[StopLoss] = None
     structural_feasibility: StructuralFeasibility
-    jp_limit_band_flag: Optional[str] = Field(
-        default=None,
-        description="Set for JP tickers per rule 9 (TSE daily price-limit band / "
-        "tokubetsu-kehai check): 'may_not_be_executable' or 'limit_lock_risk', "
-        "else null.",
+    jp_limit_band_flag: Optional[JPLimitBandFlag] = Field(
+        default=None, description="Rule 9, JP tickers only; null for non-JP asset classes."
     )
     veto_reason: Optional[str] = None
 
 
 class MarketRegimeVerdict(BaseModel):
-    """MarketRegimeAgent (section_agents.md section 11) -- system-wide, not
-    per-ticker. Consumed by RiskManagerAgent rules 3 and 6."""
+    """MarketRegimeAgent (section_agents.md section 11) -- system-wide per
+    asset class, not per-ticker. No LLM call, no rationale field, per the
+    plan's own output schema (section 11's JSON block has neither)."""
 
+    agent_name: Literal["MarketRegimeAgent"] = "MarketRegimeAgent"
+    asset_class: AssetClass
     as_of_timestamp: datetime
-    trailing_realized_vol_percentile: float = Field(ge=0.0, le=100.0)
-    position_size_ceiling_multiplier: float = Field(
-        ge=0.0, le=1.0, description="Applied on top of RiskManagerAgent's per-trade cap"
-    )
-    rationale: str = Field(max_length=280)
+    vol_percentile: float = Field(ge=0.0, le=100.0)
+    regime_breaker_active: bool
+    position_size_ceiling_multiplier: float = Field(ge=0.0, le=1.0)
     data_quality_flag: DataQualityFlag = DataQualityFlag.OK
 
 
-FinalCall = Literal["BUY", "SELL", "HOLD"]
+FinalCall = Literal["BUY", "SELL", "HOLD", "WATCH"]
+RiskManagerOverride = Literal["none", "reduce_size", "veto"]
+
+
+class ComponentBreakdownRow(BaseModel):
+    agent: str
+    score: float
+    confidence: float
+    weight: float
+    contribution: float
 
 
 class SupervisorVerdict(BaseModel):
-    """PortfolioSupervisorAgent (section_agents.md section 10) -- deterministic
+    """PortfolioSupervisorAgent (section_agents.md section 10.5) -- deterministic
     aggregation output, computed by orchestration/aggregate.py, not another LLM
-    call. rationale is the only LLM-authored field."""
+    call. `rationale` is the only LLM-authored field. `human_action_required` is
+    always True: this is a terminal artifact, never an input to an execution tool
+    that doesn't exist in this system."""
 
+    agent_name: Literal["PortfolioSupervisorAgent"] = "PortfolioSupervisorAgent"
     recommendation_id: str = Field(description="f'{ticker}-{as_of_date}', == LangGraph thread_id")
-    ticker: str
     asset_class: AssetClass
+    ticker: str
     as_of_timestamp: datetime
     final_call: FinalCall
     blended_score: float = Field(ge=-1.0, le=1.0)
     overall_confidence: float = Field(ge=0.0, le=1.0)
-    component_verdicts: dict[str, AgentVerdict]
-    risk_verdict: RiskManagerVerdict
-    regime_multiplier_applied: float
-    override_reason: Optional[str] = None
-    rationale: str
+    component_breakdown: list[ComponentBreakdownRow]
+    disagreement_penalty_applied: float
+    risk_manager_override: RiskManagerOverride
+    suggested_holding_period: HoldingPeriod
+    stop_loss: StopLoss
+    profit_target: ProfitTarget
+    max_position_size_currency: float
+    rationale: str = Field(max_length=500)
+    human_action_required: Literal[True] = True
