@@ -112,10 +112,15 @@ alerting:
                               # the absence of any execution tool anywhere in code
 
 llm:
-  provider: ollama                 # local, free -- see section_orchestration.md section 1
-  model: qwen2.5:7b
-  temperature: 0.1
-  fallback_provider: null          # set to "anthropic" + ANTHROPIC_API_KEY if you want a paid fallback
+  provider: rakuten_gateway         # Claude via the same internal gateway used by
+                                    # ../Server_failure/rakuten-failure-agent -- see
+                                    # agents/llm_client.py for the live-verified
+                                    # construction quirks (temperature unsupported,
+                                    # max_tokens=128000, streaming required).
+  model: ${LLM_MODEL}               # defaults to claude-sonnet-5 per .env.example
+  temperature: null                 # claude-sonnet-5 rejects this param (400) -- never sent
+  fallback_provider: ollama         # local, free, no key needed (qwen2.5:7b already pulled)
+  fallback_model: qwen2.5:7b
 
 backtesting:
   walk_forward:
