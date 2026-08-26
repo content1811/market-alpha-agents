@@ -2,7 +2,7 @@
 
 A local, multi-agent research system that analyzes US equities, Japanese equities (TSE), and major crypto to produce **manual decision-support** for day/swing trading: a scored buy/sell/hold call per ticker with a suggested holding period, profit target, and stop-loss, plus the reasoning behind it. It never places or auto-executes trades — every recommendation is meant to be read by a human and acted on manually.
 
-Status as of 2026-08-26: **planning complete, no application code written yet.** This repo currently contains the research and design phase only. See "Where things stand" below for what's next.
+Status as of 2026-08-26: **planning complete; Phase 0 (environment setup) done; Phase 1 (data layer) underway.** See "Where things stand" below for exactly what's built, tested, and next.
 
 ## Read this before anything else
 
@@ -62,4 +62,19 @@ Phase 0 (env setup) → 1 (data layer) → 2 (specialist agents) → 3 (supervis
 
 ## Where things stand / next steps
 
-Nothing beyond this planning phase has been built yet. The natural next step is Phase 0: initialize the Python project (`pyproject.toml`/`requirements.txt`), set up `config/config.yaml` and `.env.example`, and stand up `data/schema.py`'s canonical models — see `section_orchestration.md` §3 Phase 0 for the exact deliverables and done-criteria before starting Phase 1.
+**Phase 0 (Environment Setup) — done and verified:**
+- `pyproject.toml` + a local `.venv` with all core deps installed and importable.
+- `config/config.yaml`, `.env.example`, and stub `config/watchlists/*.yaml` / `config/strategies/*.yaml` populated with real parameter defaults pulled from `section_agents.md`.
+- `scripts/validate_config.py` runs clean against the real config (`python scripts/validate_config.py`).
+- `orchestration/hello_world_graph.py` — a one-node LangGraph graph that checkpoints to `orchestration/checkpoints.db` via `SqliteSaver` — runs and passes.
+- macOS notification permission confirmed via `osascript`.
+- `scheduler/com.marketalpha.dailyrun.plist` written as a template, **deliberately not installed** — there's no `run_daily_scan.py` yet (that's Phase 6), so loading a launchd agent now would just fail on every tick.
+
+**Phase 1 (Data Layer) — foundation done, 3 of ~13 connectors built:**
+- `data/schema.py` — the canonical `NormalizedBar`/`NormalizedFundamental`/`NormalizedNewsItem`/`NormalizedSignal` models, including the mandated `adjusted`/`adjustment_factor` fields and `DataQualityFlag` enum.
+- `agents/schemas.py` — the shared `AgentVerdict`/`RiskManagerVerdict`/`MarketRegimeVerdict`/`SupervisorVerdict` envelope per `section_agents.md` §0.
+- `data/connectors/base.py` — the `DataSource` ABC with a real SQLite rate-limit ledger, a disk-backed read-through cache, and a circuit breaker implementing the canonical `ok`/`stale`/`unavailable` propagation rule from `section_data_pipeline.md` §2.4. Covered by 6 passing unit tests (`tests/test_data_connectors/test_base_datasource.py`) — this caught and fixed a real bug where diskcache's own eviction made the originally-designed staleness check impossible.
+- Three **keyless** connectors implemented and verified against live data just now: `us_equities_yfinance.py` (AAPL), `crypto_ccxt.py` (BTC/USDT via Binance public), `jp_equities_yahoo_unofficial.py` (7203.T Toyota).
+- The mandated split-adjustment regression test (`test_us_equities_yfinance.py`) passes against NVDA's real 2024-06-10 10:1 split.
+
+**Not yet built (remaining Phase 1 work):** the ~10 connectors needing API keys/registration (Twelve Data, Tiingo, Alpha Vantage, SEC EDGAR, FINRA short interest, J-Quants, EDINET, Dune Analytics, Etherscan V2) — these need you to register for free accounts first (see `.env.example`); the Parquet/DuckDB analytical store and `state.db`/`news.db` operational store from `section_data_pipeline.md` §2.3; and the ingestion-cadence scheduler jobs. After that: Phase 2 (specialist agents).
