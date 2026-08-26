@@ -1,0 +1,220 @@
+# Data Sources, Pipeline & Monitoring/Alerting Design
+
+This section specifies the concrete free-tier data sources, the local ingestion/storage pipeline, the news/sentiment scoring path into `NewsSentimentAgent`, and the alerting/scheduling design for the local multi-agent system. Everything below assumes **$0 recurring spend**, a single machine (macOS, per current setup), and no live-execution capability anywhere in the pipeline — this layer only produces data, scores, and human-readable alerts.
+
+---
+
+## 1. Data Sources
+
+All entries verified against free-tier terms as of August 2026. Treat every "no key" / scraped source as fragile (undocumented, subject to breakage) and every free-tier limit as subject to change without notice — the pipeline design in §2 assumes this instability, it doesn't assume any of these numbers are permanent.
+
+| Source | Asset Class | Data Type | Endpoint / Library | Auth | Rate Limit (free tier) | Cost |
+|---|---|---|---|---|---|---|
+| **yfinance** (`pip install yfinance`, v1.6.0) | US equities | OHLCV (daily/intraday), options chains, dividends/splits, earnings dates, basic fundamentals | Python lib, wraps `query1.finance.yahoo.com` | None | Undocumented/unofficial — throttles and 429s at high frequency; needs browser `User-Agent` and occasional `curl_cffi` impersonation | Free |
+| **Twelve Data** | US equities/ETF, FX, crypto | OHLCV, 100+ technical indicators | REST, `api.twelvedata.com` | Free API key | 8 calls/min, 800 calls/day | Free |
+| **Tiingo** | US equities | EOD OHLCV (30+ yrs history, 49k tickers) | REST, `api.tiingo.com` | Free API key | 50 req/hr, 1,000 req/day, 500 unique symbols/mo | Free |
+| **Alpha Vantage** | US equities | Fundamentals (`OVERVIEW`, statements), `EARNINGS_CALENDAR`, `NEWS_SENTIMENT` | REST, `alphavantage.co/query` | Free API key | **25 requests/day** (hard cap — reserve for fundamentals/earnings, not price bars) | Free |
+| **SEC EDGAR (XBRL + submissions)** | US equities | Fundamentals from filings, filing history | REST, `data.sec.gov/api/xbrl/companyfacts/`, `/submissions/CIK##########.json` | None, but requires descriptive `User-Agent` header w/ contact email | ~10 req/sec fair-access policy | Free |
+| **SEC EDGAR "getcurrent" feed** | US equities | Real-time 8-K/other filing alerts | Atom feed, `sec.gov/cgi-bin/browse-edgar?action=getcurrent` | Same UA requirement | Same 10 req/sec | Free |
+| **FINRA Equity Short Interest** | US equities | Short interest % of float | Web grid / `developer.finra.org` Query API | Free registration | Biweekly release (structurally delayed ~7 business days) | Free |
+| **J-Quants (Free plan)** | Japan/TSE equities | Listed-issue master, daily OHLC, financial summary, earnings calendar | REST v2, `api.jquants.com/v2/...` | Free API key (email or Google signup) | 5 calls/min; history capped at 2 yrs **minus most recent 12 weeks** | Free |
+| **Yahoo Finance unofficial chart API (`.T` tickers)** | Japan/TSE equities | OHLCV | `query1.finance.yahoo.com/v8/finance/chart/{ticker}.T` | None (needs Chrome UA header to avoid 429) | Undocumented, throttled | Free |
+| **EDINET API v2** | Japan equities | Filings (securities/extraordinary reports), full XBRL | REST, `disclosure.edinet-fsa.go.jp/api/v2/documents.json` | Free subscription key (`Ocp-Apim-Subscription-Key`) | Not published — poll conservatively (≤1 req/5–10 sec) | Free |
+| **JPX Statistics pages** | Japan equities | Aggregate short-selling value by industry, outstanding margin balances | HTML (scrape) | None | Updated daily (short-selling) / weekly (margin) | Free |
+| **TDnet** | Japan equities | Company timely-disclosure filings | HTML browse only, no feed | None | N/A (scrape-only) | Free |
+| **Binance public REST API** | Crypto | OHLCV, funding rate, open interest | REST, `api.binance.com/api/v3`, `/fapi/v1/fundingRate` | None for public market data | Weight-based (~1200 weight/min); public endpoints don't need a key | Free |
+| **CoinGecko API** | Crypto | Spot price, market cap, BTC/ETH dominance | REST, `api.coingecko.com/api/v3` | Free "Demo" key optional | 100 calls/min soft cap, ~10k credits/mo | Free |
+| **Alternative.me** | Crypto | Fear & Greed Index (0–100) | REST, `api.alternative.me/fng/` | None | No published cap, poll ≤1×/hr | Free |
+| **Blockchaincenter.net** | Crypto | Altcoin Season Index (% of top-50 beating BTC over 90d) | HTML (scrape) | None | Daily update | Free |
+| **CoinGlass (dashboard)** | Crypto | Funding, OI, liquidation heatmap, Altcoin Season Index | Web dashboard (view only) | None | N/A — programmatic API is $29/mo, dashboard viewing is free | Free (manual) |
+| **Glassnode (Community tier)** | Crypto | MVRV, limited SOPR/active-address on-chain metrics (BTC/ETH) | REST, `api.glassnode.com` | Free API key | Limited metric set, coarse resolution | Free |
+| **Finnhub** | US equities + crypto/forex | Real-time quotes, general/company news | REST, `finnhub.io/api/v1` | Free API key | ~60 calls/min (unverified live — confirm in dashboard) | Free |
+| **RSS (CoinDesk, CoinTelegraph, MarketWatch, CNBC, Yahoo Finance, Seeking Alpha, Investing.com, Japan Times, NHK Business, Yahoo Japan Business)** | All | Headlines | Standard RSS 2.0 | None | Poll hourly, be a polite client | Free |
+
+**Explicitly excluded from the design:** X/Twitter API (no free tier at all in 2026 — pure pay-per-credit), Ortex/Unusual Whales/Market Chameleon (paid, no usable free API), NewsAPI.org free tier (ToS explicitly forbids production/internal use), CoinGlass programmatic API ($29/mo). IEX Cloud is retired (2024) and should not appear in any code.
+
+---
+
+## 2. Local Data Pipeline Design
+
+### 2.1 Ingestion cadence (per source, driven by rate-limit budget)
+
+| Data | Cadence | Rationale |
+|---|---|---|
+| US/JP equity OHLCV (yfinance/Twelve Data/Tiingo/Yahoo `.T`) | Every 15–30 min during market hours; 1×/day EOD otherwise | Matches intraday-check schedule (§5) without exceeding vendor throttling |
+| J-Quants Free | 1×/day, batched at ≤5 calls/min | Free tier is 12-week-lagged anyway — no value in polling more often; used for reference/backtest data only |
+| Alpha Vantage (fundamentals/earnings) | 1×/week per ticker, or on-demand when a ticker enters the watchlist | 25/day cap must cover the whole watchlist |
+| SEC EDGAR filings feed | Poll every 2–5 min | Real-time trigger source, well within 10 req/sec |
+| EDINET | Poll every 15–30 min | Conservative, undocumented limit |
+| TDnet / JPX stats pages | 1×/day (after JST close) | HTML scrape, no realtime need |
+| FINRA short interest | 2×/month (on release date) | Matches the source's own publication cadence |
+| Crypto OHLCV/funding/OI (Binance, CoinGecko) | Every 5–15 min, 24/7 | Crypto trades round the clock; funding settles every 1h/8h depending on exchange |
+| Fear & Greed, Altcoin Season Index, BTC dominance | 4×/day | These are slow-moving composites; no benefit to finer polling |
+| News RSS / Finnhub news | Every 5–10 min during market hours, 15–30 min overnight | Balance freshness vs. request budget |
+
+### 2.2 Normalization layer
+
+All raw pulls land in a `raw/` staging area (JSON/CSV as returned by each vendor) and are immediately normalized into a common internal schema before anything else touches them:
+
+```
+NormalizedBar: {symbol, exchange, asset_class, ts_utc, open, high, low, close, volume, source, ingested_at}
+NormalizedFundamental: {symbol, period_end, metric, value, unit, source, ingested_at}
+NormalizedNewsItem: {item_id (hash of url+title), symbol_tags[], headline, summary, source, url, published_at_utc, ingested_at}
+NormalizedSignal: {symbol, asset_class, ts_utc, signal_name, score, weight, agent, params_json}
+```
+
+A thin adapter module per vendor (`adapters/yfinance.py`, `adapters/jquants.py`, `adapters/binance.py`, …) is the *only* place vendor-specific quirks live (timezones — JST for TSE, UTC for crypto exchanges, ET for US equities; currency — JPY vs USD vs USDT; symbol conventions — `7203.T` vs `7203` vs `TM`). Everything downstream operates only on the normalized schema and UTC timestamps, converting to local display timezone only at the alert/UI layer.
+
+### 2.3 Local storage
+
+Two-tier local storage, chosen deliberately rather than "just SQLite for everything":
+
+- **SQLite (`state.db`)** — the *operational* store: watchlists, open "paper" positions/suggestions, rate-limit call ledgers (see §2.4), agent run logs, alert-dedup keys, and the cross-day memory store described in the orchestration design (prior recommendations keyed by `symbol/date`). SQLite is the right tool here because these are small, transactional, frequently-read/written rows and the system needs simple crash-safe persistence with zero server process.
+- **Parquet files, partitioned by `asset_class/symbol/year/month`** — the *analytical* store for OHLCV bars, computed indicator series, and historical signal scores (e.g., `data/parquet/equities_us/AAPL/2026/08.parquet`). Parquet is used because backtesting and walk-forward validation (per the risk-validation research) need fast columnar scans over years of bars across many symbols — something SQLite handles poorly at scale.
+- **DuckDB as the query engine over the Parquet lake** — rather than a separate database, DuckDB is used in-process (`duckdb.connect()`) purely to run SQL directly against the Parquet files for backtests, screener queries ("rank all US watchlist tickers by 252-day return"), and report generation. This avoids ETL-ing Parquet into yet another database; DuckDB queries the files where they sit.
+- **News/sentiment**: raw headlines + FinBERT/local-LLM scores are written to a SQLite table (`news_items`, `sentiment_scores`) rather than Parquet, since this is high-cardinality text with lookups by symbol/date rather than large-scale numeric scans.
+
+Rough layout:
+```
+data/
+  raw/                  # vendor-native responses, kept ~30 days for debugging, then pruned
+  parquet/
+    equities_us/<symbol>/<yyyy>/<mm>.parquet
+    equities_jp/<symbol>/<yyyy>/<mm>.parquet
+    crypto/<symbol>/<yyyy>/<mm>.parquet
+  state.db              # SQLite: watchlist, positions, agent logs, memory store, rate-limit ledger
+  news.db               # SQLite: news_items, sentiment_scores
+```
+
+### 2.4 Caching and rate-limit respect
+
+- **Token-bucket ledger in SQLite**: a `rate_limit_calls(source TEXT, ts_utc REAL)` table. Before any adapter fires a request, it queries `COUNT(*) WHERE source=? AND ts_utc > now - window` and compares against that source's documented cap (e.g., Alpha Vantage: 25/day; J-Quants: 5/min; Twelve Data: 8/min & 800/day). If the budget is exhausted, the call is deferred to the next scheduled tick or served from cache — never retried in a tight loop.
+- **Read-through disk cache** (e.g., `diskcache` library or plain JSON files with a TTL column) keyed by `(source, endpoint, params_hash)`, with TTL matched to the ingestion cadence in §2.1 (e.g., a J-Quants pull is cached for 24h; a Binance funding-rate pull for 5 min). This means a crashed/retried job or an ad-hoc agent query never issues a duplicate live call within the TTL window.
+- **Backoff on 429/5xx**: exponential backoff (base 2s, capped at 5 min) with jitter, specifically because yfinance, the Yahoo `.T` endpoint, and Stooq are documented to throttle unpredictably in 2026; a hard circuit-breaker (skip source for the rest of the run, log a warning) prevents one flaky vendor from stalling the whole scheduled job.
+- **Batching**: wherever a vendor supports multi-symbol or wide-date-range calls in one request (Alpha Vantage's `EARNINGS_CALENDAR` CSV sweep, Twelve Data batch quotes), the pipeline always prefers one wide call over many narrow ones to conserve the daily/per-minute budget.
+
+---
+
+## 3. News & Sentiment Monitoring Design
+
+### 3.1 Sources feeding the monitor
+
+- **Real-time filing triggers**: SEC EDGAR "getcurrent" Atom feed (US, true real-time, free) for 8-K/10-Q/10-K/Form 4; EDINET API v2 poll (Japan, key required) for extraordinary/securities reports; TDnet HTML poll as a fallback/cross-check for JP disclosures (no clean feed exists, so this is a scheduled scrape, not push).
+- **Headline firehose**: RSS from CoinDesk, CoinTelegraph (crypto); MarketWatch, CNBC, Yahoo Finance, Seeking Alpha, Investing.com (US); Japan Times, NHK Business, Yahoo Japan Business (JP, general-interest — there is no free Nikkei feed, a known gap for JP-specific coverage). Finnhub `company_news`/`general_news` for ticker-scoped headlines.
+- **Pre-scored cross-check**: Alpha Vantage `NEWS_SENTIMENT` (25/day budget) used sparingly to spot-check the local scorer's output against a vendor-provided sentiment label, not as a primary feed.
+- **Crypto-specific sentiment composites**: Alternative.me Fear & Greed Index, Blockchaincenter Altcoin Season Index, BTC dominance (CoinGecko) — these feed the crypto leg of `NewsSentimentAgent` as macro/regime overlays rather than headline-level scores.
+
+### 3.2 Scoring pipeline
+
+1. **Ingest & dedupe**: every RSS/API item is hashed (`sha256(url + title)`) and upserted into `news.db:news_items`; duplicates across feeds (common — e.g., the same Reuters wire story appearing on both MarketWatch and Yahoo Finance) are collapsed to one row with a `sources[]` array.
+2. **Symbol tagging**: simple ticker/company-name matching against the current watchlist (plus a small alias table, e.g., "Toyota" → `7203.T`) to attach `symbol_tags[]`. Items with no watchlist match are kept for macro-sentiment aggregates (Fear & Greed style rollups) but don't trigger per-ticker alerts.
+3. **First-pass filter — FinBERT** (`ProsusAI/finbert`, local, CPU): every tagged headline+summary gets a positive/negative/neutral softmax score. This is fast enough to run on the full firehose without cost.
+4. **Second-pass — local LLM via Ollama** (e.g., Qwen2.5 7B or Phi-4-mini, already running locally with no API cost): only headlines that (a) are tagged to a watchlist symbol *and* (b) clear a magnitude/relevance threshold from the FinBERT pass are re-scored with a structured-JSON prompt: `{"score": -1..1, "confidence": 0..1, "rationale": "...", "event_type": "earnings|filing|macro|rumor|analyst|other"}`. This two-pass design keeps LLM latency/CPU load bounded to a small, relevant subset rather than every headline.
+5. **Aggregation into a per-symbol sentiment score**: `NewsSentimentAgent` reads the last N hours (configurable, default 24h for equities, 6h for crypto given faster news cycles) of scored items for a symbol, computes a recency-weighted average (exponential decay, half-life ~4h) and an item count, and outputs a single structured verdict matching the same schema as the other specialist agents: `{signal: BUY|SELL|HOLD, conviction: 0-1, rationale, key_risks}`. Item count acts as a confidence multiplier — one strongly negative headline moves the score less than three independently-sourced negative headlines.
+6. **Explicit low-precision framing**: per the research, headline sentiment (FinBERT or small local LLM) is treated as a *noisy, high-recall/low-precision* input — `NewsSentimentAgent`'s conviction is capped (e.g., max 0.6) so it can tilt the supervisor's weighted aggregation but can't unilaterally flip a BUY/SELL recommendation on sentiment alone.
+7. **Filing-triggered override path**: an EDGAR/EDINET filing for a watchlist symbol bypasses the sentiment-scoring pipeline entirely and goes straight to the alerting layer (§4) as a "filing alert" — a fact, not a sentiment judgment, so it doesn't need FinBERT/LLM scoring, just a link and filing type.
+
+---
+
+## 4. Alerting Design
+
+### 4.1 Alert triggers (concrete thresholds)
+
+| Trigger | Condition | Severity |
+|---|---|---|
+| Composite signal score crosses threshold | Supervisor's aggregated score moves from below to at/above `\|score\| ≥ 0.7` for a watchlist symbol | High |
+| Squeeze-risk flag | Composite squeeze score (§ short-squeeze factors) ≥ 0.6 | High |
+| Open "suggested position" stop/target proximity | Price within 0.5×ATR of the suggested stop-loss or profit-target level | High (stop) / Medium (target) |
+| RVOL + price spike | RVOL ≥ 3× with same-bar \|return\| ≥ 2% (equities) or ≥ 4% (crypto, higher baseline vol) | Medium |
+| New filing on watchlist symbol | EDGAR 8-K / EDINET extraordinary or securities report / TDnet disclosure matched to a watchlist ticker | Medium (auto-escalated to High if filing type is "material event"/8-K Item 2.02, 5.02, etc.) |
+| Upcoming token unlock | Unlock event within 7 days sized ≥2% of circulating supply or ≥20× daily volume | Medium |
+| Earnings date approaching | Watchlist symbol has earnings within 24h | Medium (position-sizing caution, not directional) |
+| Sentiment extreme + open exposure | Fear & Greed ≥ 80 or ≤ 20 while the symbol/asset-class has an open suggested position | Low (informational risk overlay) |
+| Data pipeline failure | A required source has failed to refresh within 2× its expected cadence (e.g., no OHLCV update in 60 min during market hours) | Low (ops alert, separate channel) |
+
+Every alert is deduplicated: a `(symbol, trigger_type, bucket)` key is written to SQLite with a cooldown window (e.g., 2 hours for the same trigger on the same symbol) so a stock hovering exactly at the 0.7 threshold doesn't spam the channel every 15-minute cycle.
+
+### 4.2 Channels
+
+- **Telegram Bot API (primary)** — free, HTTPS, simple `POST https://api.telegram.org/bot<token>/sendMessage`, ≤1 msg/sec per chat is far above this system's alert volume. Chosen as primary because it's push (arrives on phone immediately, unlike email), supports basic Markdown formatting, and needs no always-on listener on the local machine (fire-and-forget POST is enough; no need to run the bot in polling mode for a one-way alert channel).
+- **Discord webhook (secondary/backup)** — free, no bot/auth needed, simple incoming webhook POST; used as a redundant channel in case Telegram delivery fails, and as the destination for the lower-priority "ops/pipeline failure" alerts to keep the Telegram channel focused on trading-relevant signals.
+- **macOS local notification** — `osascript -e 'display notification ...'` (confirmed working on current macOS) for the EOD summary and pre-market scan completion, since the operator is expected to be at the machine at those times.
+- **Email (SMTP, Gmail app-password)** — used only for the End-of-Day summary digest (a longer, multi-symbol report unsuited to a chat message) and the weekly seasonality refresh report.
+
+### 4.3 Example alert message formats
+
+**High-severity composite signal alert (Telegram, Markdown):**
+```
+🟢 *BUY signal — 7203.T (Toyota)*
+Score: +0.78 | Conviction: 0.71 | Asset: JP Equity
+
+Drivers:
+• Momentum: 252d return percentile 88 (+0.6)
+• Volume: RVOL 3.2x on breakout above 20d Donchian high (+0.5)
+• News: 3 positive filings-tagged headlines, 6h decay window (+0.3)
+• Risk-manager: no veto (squeeze/earnings flags clear)
+
+Entry ref: ¥2,940 | Stop: ¥2,860 (1.8x ATR14) | Target: ¥3,140 (2R)
+Suggested hold: 5–15 trading days (swing)
+
+⚠️ Earnings in 9 days — consider trimming size or exiting before release.
+Generated 2026-08-26 08:47 JST | This is analysis only — no order was placed.
+```
+
+**Filing alert (Telegram):**
+```
+📄 *New 8-K filed — NVDA*
+Item 5.02 (officer departure) | Filed 2026-08-26 16:02 ET
+https://www.sec.gov/... (EDGAR link)
+No sentiment/score computed yet — headline-level scoring pending.
+```
+
+**Squeeze-risk flag:**
+```
+⚠️ *Squeeze-risk watch — XYZ*
+Squeeze score: 0.64 (SI% of float 34%, days-to-cover 8.1, borrow fee +12% WoW)
+Not a directional signal — flagging elevated volatility/whipsaw risk if you're
+considering a short, or upside-risk if considering a long entry timing.
+```
+
+**EOD summary (email/local notification, one line per watchlist symbol):**
+```
+Daily Summary — 2026-08-26
+US: AAPL HOLD (0.12) | NVDA BUY (0.61, filing caution) | TSLA SELL (-0.55)
+JP: 7203.T BUY (0.78) | 6758.T HOLD (0.08)
+Crypto: BTC HOLD (0.15, F&G=81 extreme greed, tighten stops) | ETH BUY (0.44)
+Pipeline health: J-Quants OK, EDINET OK, Binance OK, yfinance 2 retries (recovered)
+```
+
+### 4.4 What never triggers an alert or an action
+
+Consistent with the "no auto-execution" requirement: alerts are informational only, no alert payload contains an executable order, no channel/bot has write-back capability into a broker/exchange account, and the human-in-the-loop checkpoint (per the orchestration design) gates even the *writing* of a recommendation to the log/alert layer — the pipeline can compute scores continuously, but nothing gets pushed to Telegram/Discord without passing that checkpoint.
+
+---
+
+## 5. Recommended Run Schedule
+
+Implemented via **APScheduler 3.x** (the 4.0 line is still alpha as of Aug 2026 — do not build on it) running as a long-lived process supervised by a `launchd` plist (`~/Library/LaunchAgents/com.local.tradingagents.plist`) so it survives reboots/sleep. All times below are illustrative local-market times; the scheduler itself should be configured with explicit timezone-aware cron triggers (`America/New_York` for US, `Asia/Tokyo` for JP, `UTC` for crypto) rather than relying on the machine's local timezone.
+
+| Job | Schedule | Purpose |
+|---|---|---|
+| **Pre-market scan (US)** | 08:00–09:15 ET, every 15 min | Refresh overnight news/filings, recompute scores for watchlist, surface pre-market gappers/RVOL spikes before 09:30 open |
+| **Pre-market scan (JP)** | 08:00–09:00 JST, every 15 min | Same, ahead of TSE 09:00 JST open |
+| **Intraday check (US equities)** | Every 15–30 min, 09:30–16:00 ET | Re-score watchlist, check stop/target proximity, RVOL spikes |
+| **Intraday check (JP equities)** | Every 15–30 min, 09:00–11:30 & 12:30–15:00 JST | Same, respecting TSE's lunch break |
+| **Crypto check** | Every 15 min, continuous 24/7 | No market close; funding-rate/OI/liquidation refresh plus signal re-score |
+| **News/filing poll** | Every 2–5 min (EDGAR feed), every 15–30 min (EDINET, RSS) | Continuous background job, independent of market-hours jobs |
+| **End-of-day summary** | 16:30 ET (US), 15:30 JST (JP), and 00:00 UTC (crypto daily rollup) | Persist the day's closing scores/positions to the SQLite memory store, send the EOD digest (§4.3) |
+| **Overnight backfill/cache refresh** | 02:00 local machine time | Pull any missed bars, refresh fundamentals for tickers due for weekly refresh, prune `raw/` cache older than 30 days |
+| **Weekly seasonality refresh** | Sunday 18:00 local | Recompute day-of-week/turn-of-month/sector-rotation buckets and PEAD/SUE rankings against the latest week of data; refresh the DuckDB/Parquet-derived seasonality tables used by the technical-analysis agents |
+| **Rate-limit ledger audit / health check** | Daily, 00:05 local | Verify no source exceeded budget in the prior 24h, alert (Discord ops channel) if any adapter has been failing beyond its retry/backoff window |
+
+---
+
+### Summary of key design choices and why
+
+- **SQLite for operational state, Parquet+DuckDB for historical/analytical data** — avoids forcing one storage engine to do two very different jobs (transactional small-row state vs. columnar multi-year backtesting scans).
+- **Two-pass FinBERT → local-LLM sentiment scoring** keeps compute bounded on a single local machine while still getting context-aware scoring on the subset of headlines that matter.
+- **Telegram as primary alert channel**, Discord as backup, matches the free, low-latency, push-capable requirement with no server component needed.
+- **All rate limits are enforced defensively** (ledger + cache + backoff) because nearly every free-tier source in this stack (yfinance, Yahoo `.T`, Stooq, J-Quants Free, Alpha Vantage) is explicitly documented above as either thin, undocumented, or increasingly anti-scraping-hardened in 2026 — the pipeline is designed to degrade gracefully (serve cached/stale data, skip a cycle) rather than crash or get IP-blocked.
+- **Nothing in this design writes orders or has execution capability** — the pipeline's only outputs are scores, log entries, and alert messages for a human to act on manually.

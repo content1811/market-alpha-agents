@@ -1,0 +1,1 @@
+I don't see a specific task or question in your message yet — just tool/skill setup notices. What would you like me to help with?
