@@ -4,13 +4,13 @@
 
 Before defining each agent, three conventions apply system-wide so that the `PortfolioSupervisorAgent` can mechanically reconcile heterogeneous outputs rather than re-interpreting free text each time.
 
-**Signal score convention.** Every analysis agent (except `RiskManagerAgent`, which is a gate/modifier, not a directional voter) outputs a single float `signal_score ∈ [-1.0, +1.0]`: `-1.0` = maximum-conviction sell/short, `0.0` = neutral/no-edge, `+1.0` = maximum-conviction buy. This mirrors the score-mapping formulas already worked out in the underlying TA and crypto-factor research (e.g. `score = -(2×%B - 1)`, `score = clip(z/2, -1, 1)`), so each agent is really just a thin LLM/prompt wrapper around a deterministic numeric computation — the LLM's job is to interpret the computed sub-scores in context and write the rationale, not to eyeball a chart and guess a number.
+**Signal score convention.** Every analysis agent (except `RiskManagerAgent` and `MarketRegimeAgent`, §11, both of which are gates/modifiers, not directional voters) outputs a single float `signal_score ∈ [-1.0, +1.0]`: `-1.0` = maximum-conviction sell/short, `0.0` = neutral/no-edge, `+1.0` = maximum-conviction buy. This mirrors the score-mapping formulas already worked out in the underlying TA and crypto-factor research (e.g. `score = -(2×%B - 1)`, `score = clip(z/2, -1, 1)`), so each agent is really just a thin LLM/prompt wrapper around a deterministic numeric computation — the LLM's job is to interpret the computed sub-scores in context and write the rationale, not to eyeball a chart and guess a number.
 
 **Confidence is separate from score.** `confidence ∈ [0.0, 1.0]` reflects how *reliable* the current reading is (sample size, data freshness, regime fit, agreement between sub-indicators) — not how extreme the score is. A `-0.9` score with `confidence 0.2` (e.g., RSI-2 deeply oversold but on a thin, gapping small-cap with stale data) must be treated very differently from a `-0.9` score with `confidence 0.8`.
 
 **Every agent must declare its regime/gating logic.** Per the TA research, ADX (and equivalents) function as a *regime switch*, not a standalone signal — mean-reversion agents must gate themselves off in strong trends and vice versa. This is specified per-agent below and is mandatory, not optional, since the research explicitly warns that fading a real breakout (or trend-following into a range-bound chop) is the most common way this class of system loses money.
 
-**Shared output schema (JSON).** All ten agents emit this envelope; only the fields inside `sub_scores` and the specific enumerations differ:
+**Shared output schema (JSON).** All directional (non-gate/modifier) agents emit this envelope; only the fields inside `sub_scores` and the specific enumerations differ. `RiskManagerAgent` (§9) and `MarketRegimeAgent` (§11) are gates/modifiers rather than directional voters and each define their own differently-shaped output schema instead:
 
 ```json
 {
@@ -29,6 +29,7 @@ Before defining each agent, three conventions apply system-wide so that the `Por
   "data_quality_flag": "ok | stale | partial | unavailable"
 }
 ```
+The canonical propagation rule for `data_quality_flag` — exactly when a value becomes `stale` vs. `unavailable`, and what that forces each agent (and `RiskManagerAgent`) to do — is defined once in the data & alerting section (§2.4); every agent below consumes that rule rather than redefining it (see, e.g., `RiskManagerAgent`'s Confidence note in §9 for a worked example).
 
 **Asset-class applicability matrix.** Not every agent fires for every asset class — this must be enforced in code (the supervisor should never receive, e.g., a `CryptoOnChainAgent` verdict for a TSE ticker):
 
@@ -43,6 +44,7 @@ Before defining each agent, three conventions apply system-wide so that the `Por
 | CryptoDerivativesAgent | ❌ | ❌ | ✅ |
 | NewsSentimentAgent | ✅ | ✅ (thinner free feed) | ✅ |
 | RiskManagerAgent | ✅ | ✅ | ✅ |
+| MarketRegimeAgent (§11, system-wide, not per-ticker) | ✅ | ✅ | ✅ |
 | PortfolioSupervisorAgent | ✅ | ✅ | ✅ |
 
 ---
@@ -61,7 +63,7 @@ Before defining each agent, three conventions apply system-wide so that the `Por
 2. **RSI-2 (Connors)**: 2-period RSI + 200-day SMA trend filter. Long trigger: `RSI(2) < 5` AND `price > SMA(200)`. Exit: `RSI(2) > 70` or close > prior day's high.
 3. **VWAP reversion** (intraday/day-trade variant only): session VWAP ± σ bands; fire fade at `|z| ≥ 2` where `z=(price-VWAP)/intraday_stdev`; disabled in first/last 15 minutes of session.
 4. **Z-score vs 20–50 day MA**: `z=(price-MA)/σ`. Fire at `|z|≥2`. Before trusting, require an ADF/half-life sanity check (or at minimum the ADX gate below) — do not fire on a series behaving like a trend, not a range.
-5. **Regime gate (mandatory)**: compute ADX(14). If `ADX > 25`, multiply all mean-reversion sub-scores by `(1 - trend_confidence)` where `trend_confidence = clip((ADX-20)/30, 0, 1)` — i.e. auto-suppress fades in strongly trending tape.
+5. **Regime gate (mandatory)**: compute ADX(14). If `ADX > 25`, multiply all mean-reversion sub-scores by `(1 - trend_confidence)` where `trend_confidence = clip((ADX-15)/10, 0, 1)` — i.e. auto-suppress fades in strongly trending tape. Corrected values: `trend_confidence(ADX=20)=0.5`, `trend_confidence(ADX=25)=1.0`, `trend_confidence(ADX=30)=1.0`, `trend_confidence(ADX=40)=1.0` — this reaches full suppression by ADX=25, matching `TrendMomentumAgent`'s ">25 = trending, full weight" threshold (see §2) rather than the earlier `(ADX-20)/30` formula, which only reached 0.17 at ADX=25.
 
 **Signal score computation.**
 ```
@@ -89,26 +91,27 @@ signal_score = raw_score * (1 - trend_confidence)
 
 **Inputs / data needed.**
 - Daily OHLCV, 252+ day history (same sources as above).
-- For cross-sectional ranking: a defined universe (e.g., watchlist of 20–50 US tickers, TOPIX-core30/40 for JP, top-20 crypto by market cap) with trailing 252-day total return for each — computable locally from cached OHLCV, no extra API.
+- For cross-sectional momentum: trailing 252-day total return of the ticker's relevant broad-market proxy — SPY for US equities, TOPIX (`^TOPX`) for JP equities, BTC (or a cap-weighted top-20 crypto index) for altcoins — computable locally from the same cached OHLCV already pulled for the proxy ticker, no extra API. (Superseded design note: an earlier draft percentile-ranked against a small hand-picked watchlist of 20–50 tickers; that inflated conviction because a ticker could rank highly against a self-selected small list while being mediocre against the actual market — see indicator #4 below.)
 - ATR(14) for normalization (shared utility, computed once per ticker per day and cached for reuse by other agents).
 
 **Concrete indicators and thresholds.**
 1. **MA crossover**: 50/200-day SMA (position-trade horizon) and 9/21-day EMA (swing horizon). Long bias when fast > slow.
-2. **ADX/DMI(14)**: `ADX<20` = no trend (suppress this agent, hand off to MeanReversionAgent); `20–25` = ambiguous, halve confidence; `>25` = trending, full weight; `>40` = strong trend, `>50` = exceptional (cap score magnitude — very high ADX often precedes exhaustion, don't let the score chase to +1.0 without a countervailing check).
+2. **ADX/DMI(14)**: `ADX<20` = no trend (suppress this agent, hand off to MeanReversionAgent); `20–25` = ambiguous, halve confidence; `>25` = trending, full weight; `>40` = strong trend, `>50` = exceptional (cap score magnitude — very high ADX often precedes exhaustion, don't let the score chase to +1.0 without a countervailing check). Per the corrected `trend_confidence` formula below, this "full weight" language is literal, not approximate: `trend_confidence(25)=1.0`, `trend_confidence(30)=1.0`, `trend_confidence(40)=1.0`.
 3. **Donchian breakout**: 20-day high/low channel (55-day for JP/crypto position-trade variant), exit channel N/2.
-4. **Cross-sectional momentum**: trailing 252-day return percentile-rank within the agent's asset-class universe, optionally with a 10–20% pullback-from-high filter to avoid buying extended names.
+4. **Cross-sectional momentum**: trailing 252-day return of the ticker minus the trailing 252-day return of its asset-class broad-market proxy (SPY for US, TOPIX for JP, BTC/cap-weighted crypto index for altcoins) — i.e. excess return vs. the actual broad market, not a percentile rank within a small hand-picked watchlist (which would silently inflate conviction by benchmarking against a self-selected list rather than the market) — optionally with a 10–20% pullback-from-high filter to avoid buying extended names.
 5. **MACD(12,26,9)**: histogram sign and zero-line side as a lagging confirmation layer, not a primary trigger.
 
 **Signal score computation.**
 ```
 ma_score      = clip((fastMA - slowMA) / ATR14, -1, 1)
 donchian_score= clip((price - prior_N_high) / ATR14, -1, 1)   # 0 if inside channel
-xsect_score   = 2*percentile_rank(trailing_252d_return, universe) - 1
+excess_return_252d = ticker_252d_return - proxy_252d_return   # proxy = SPY (US) / TOPIX (JP) / BTC or a cap-weighted crypto index (alts)
+xsect_score   = clip(excess_return_252d / 0.5, -1, 1)          # ±50pts excess return vs. the broad-market proxy maps to full score
 macd_score    = clip(histogram / ATR14, -1, 1) + (0.1 if MACD>0 else -0.1)
-trend_confidence = clip((ADX-20)/30, 0, 1)
+trend_confidence = clip((ADX-15)/10, 0, 1)   # trend_confidence(20)=0.5, (25)=1.0, (30)=1.0, (40)=1.0 — see §1 for the identical corrected formula
 signal_score = trend_confidence * weighted_avg(ma_score:0.3, donchian_score:0.25, xsect_score:0.3, macd_score:0.15)
 ```
-**Confidence** = `trend_confidence`, reduced by 0.2 if the pullback filter is violated (buying a name already extended >20% above its recent breakout with no pullback), reduced if universe size for cross-sectional ranking is small (<15 names).
+**Confidence** = `trend_confidence`, reduced by 0.2 if the pullback filter is violated (buying a name already extended >20% above its recent breakout with no pullback), reduced if the broad-market proxy is a poor structural fit for the ticker (e.g., benchmarking a small-cap value name against a growth-heavy broad index) — flag this as a known limitation in the rationale rather than treating proxy-relative momentum as a perfect peer-relative measure.
 
 **Output specifics.**
 - `suggested_holding_period`: 3–10 trading days for the 9/21 EMA / Donchian-20 swing variant; several weeks to months for the 50/200 SMA / cross-sectional variant — the agent must declare which sub-model dominated the score and set the holding period accordingly, not use one blanket default.
@@ -226,8 +229,7 @@ The supervisor is expected to consume `vol_conf_multiplier` directly (exported i
 **What it examines.** On-chain holder behavior and network fundamentals for BTC/ETH and major alts — crypto-only, no equity equivalent.
 
 **Inputs / data needed.**
-- Glassnode Community (free) tier for MVRV, MVRV Z-Score, SOPR/Adjusted SOPR, active addresses, whale-cohort balances (limited metric set — verify current free scope at each build cycle since tiers shift).
-- CryptoQuant free dashboard as a cross-check (403'd to automated crawling in this research pass — confirm current API/scrape terms before automating).
+- **Correction (Aug 2026): Glassnode's free API tier has been discontinued** — its pricing page now shows only paid "Advanced"/"Professional" plans, so it is no longer a usable $0 source for MVRV/SOPR/whale-cohort data (see `data & alerting` §1). **CryptoQuant's free dashboard** is the primary fallback for MVRV/SOPR/exchange-flow *viewing* (documented as freemium, though its API/scrape terms need re-verification before automating — it 403'd automated crawling during this research pass). Where no free, automatable source for a pre-computed metric exists, the agent must either (a) read the value manually off CryptoQuant's dashboard on a reduced cadence and accept that as a `data_quality_flag=partial` input, or (b) approximate it via custom SQL over **Dune Analytics'** free query API (computing realized-cap-derived metrics from raw on-chain data) — a real engineering lift, not an out-of-the-box metric, and lower-fidelity than Glassnode's discontinued feed. Do not assume any free, ready-made MVRV/SOPR API exists; this agent runs on structurally weaker data access than the others and should say so in its rationale.
 - Tokenomist.ai free dashboard / DefiLlama `/unlocks` for vesting-cliff schedules (altcoins only; N/A for BTC/ETH).
 - StakingRewards.com for nominal staking APY (PoS assets only).
 - CoinGecko free API (100 calls/min, 10k credits/mo) for circulating/max supply, inflation rate.
@@ -255,7 +257,7 @@ signal_score = clip(onchain_raw / 100, -1, 1)   # rescale composite 0-100-style 
 - `stop_loss`: `percent`, wider than equities (e.g., 15–25%) reflecting crypto's baseline volatility; tightened around a known unlock-cliff date.
 - `profit_target`: `percent`/structure — e.g., prior MVRV-band transition point (target exit near MVRV entering the "overheated" 3.5–7 band if entry was in the "accumulation" 1–2 band).
 
-**Persona and prompt behavior.** Persona: **an on-chain analyst who treats every metric as noisy and crowd-followed — explicitly skeptical, always naming the confounders** (entity mislabeling, OTC flow, small-sample whale cohorts). Prompt requirement: state data-source freshness/tier explicitly (e.g., "Glassnode Community tier, MVRV updated as of...") and always caveat that "on-chain signals are widely dashboarded and may already be priced in by faster participants" per the source research's explicit framing — this framing should appear near-verbatim in the persona's system prompt as a standing instruction, not left to chance per-response.
+**Persona and prompt behavior.** Persona: **an on-chain analyst who treats every metric as noisy and crowd-followed — explicitly skeptical, always naming the confounders** (entity mislabeling, OTC flow, small-sample whale cohorts). Prompt requirement: state data-source freshness/tier explicitly (e.g., "CryptoQuant dashboard read, MVRV as of...", or "Dune-approximated, lower fidelity than a dedicated on-chain vendor") and always caveat that "on-chain signals are widely dashboarded and may already be priced in by faster participants" per the source research's explicit framing — this framing should appear near-verbatim in the persona's system prompt as a standing instruction, not left to chance per-response.
 
 ---
 
@@ -341,16 +343,19 @@ signal_score = clip(headline_score, -1, 1)
 - Broker/exchange structural constraints: TSE 100-share (`tangen kabu`) unit size and mini-kabu/odd-lot availability (JP); US FINRA Rule 4210 intraday-margin (IML) framework post-PDT-rule-elimination (June 4, 2026) and ~$2,000 margin-equity floor, T+1 cash-account settlement constraints if trading a non-margin account; no analogous account minimum for crypto.
 - Correlation/exposure across currently open positions (local portfolio state) to avoid stacking correlated risk (e.g., multiple long-BTC-correlated alts simultaneously).
 - Upcoming known volatility events (earnings dates, options-expiry calendars, unlock cliffs) surfaced by SeasonalityAgent/CryptoOnChainAgent/NewsSentimentAgent.
+- **JP tickers only**: previous close and the TSE published price-limit-tier table, used to compute today's daily price-limit band (see rule 9 below).
+- `MarketRegimeAgent`'s `position_size_ceiling_multiplier` (system-wide, per asset class — see §11) as an additional input to rules 3 and 6 below.
 
 **Concrete rules and thresholds.**
 1. **Per-trade risk cap**: fixed-fractional, **0.5–1% of current equity** per trade as the default ceiling for this account size (per the research's explicit recommendation to push toward the low end for a small, concentrated account) — at ¥100,000/$650, that is roughly $3.25–$6.50 risked per trade; the agent must compute and display this dollar figure, not just a percentage.
 2. **Kelly overlay**: if a per-strategy historical edge estimate exists (from validated backtests, not raw agent confidence), compute fractional Kelly (≤¼-Kelly) as an *upper bound check* on position size, but never let it override the fixed-fractional ceiling above — full or high-fraction Kelly on noisy retail edge estimates is explicitly flagged in the research as a blow-up risk.
-3. **Volatility-adjusted sizing**: `position_size = (equity × risk_pct) / (entry - stop)`, where `(entry-stop)` is set via ATR (1.5–3×ATR14 depending on holding-period agent) — ensures a volatile crypto asset and a calm large-cap contribute comparable portfolio risk.
+3. **Volatility-adjusted sizing**: `position_size = (equity × risk_pct) / (entry - stop)`, where `(entry-stop)` is set via ATR (1.5–3×ATR14 depending on holding-period agent) — ensures a volatile crypto asset and a calm large-cap contribute comparable portfolio risk. This per-ticker result must then be multiplied by `MarketRegimeAgent`'s asset-class `position_size_ceiling_multiplier` (§11) as an additional, stacking input — the ambient market-wide regime check applies on top of, not instead of, this per-ticker ATR-based logic.
 4. **Structural feasibility check** (hard gate, not a score): for JP tickers, verify a full 100-share unit is affordable within the risk-adjusted position size; if not, either require a mini-kabu/odd-lot broker feature or **veto the trade as structurally infeasible** for this account size — do not silently downsize past what the broker actually offers.
 5. **Regulatory/account-type check**: confirm current account type (cash vs. margin) and, for US equities, whether the ~$2,000 margin floor and IML framework (post-June 2026) are satisfied if day-trading; default to cash-account/T+1-settlement assumptions unless explicitly configured otherwise.
-6. **Correlation cap**: reduce aggregate suggested size if ≥2 concurrently open/proposed positions are highly correlated (e.g., two large-cap alts both dominated by BTC-beta) — cap combined correlated exposure at a multiple (e.g., 1.5×) of the single-trade risk cap.
+6. **Correlation cap**: reduce aggregate suggested size if ≥2 concurrently open/proposed positions are highly correlated (e.g., two large-cap alts both dominated by BTC-beta) — cap combined correlated exposure at a multiple (e.g., 1.5×) of the single-trade risk cap. As with rule 3, apply `MarketRegimeAgent`'s `position_size_ceiling_multiplier` (§11) on top of this correlated-exposure cap, not instead of it — e.g., if the ambient crypto regime breaker is active, the combined correlated-crypto-exposure cap itself is also halved, not just each individual position.
 7. **Drawdown circuit breaker**: if trailing realized account drawdown exceeds a configured threshold (e.g., −15% from peak), automatically halve the per-trade risk cap and require higher aggregate confidence before approving new entries — operationalizing the research's point that a human will abandon a system after a large drawdown regardless of long-run Sharpe, so the system should itself de-risk before that happens.
 8. **Veto rule**: if this agent's own `conviction` on "avoid/reduce" exceeds **0.7**, it overrides the numeric weighted average from the other agents and forces the final recommendation to HOLD/no-new-exposure regardless of how bullish other agents are — mirroring TradingAgents' "Portfolio Manager approves or rejects" gate rather than a naive average.
+9. **JP daily price-limit band check** (JP tickers only): compute today's TSE price-limit band (previous close ± the limit-move amount for that price's published TSE price-tier table) before finalizing any stop/target for a JP ticker — a stock that hits its limit can freeze into 特別気配 (special quotation) with stop/limit orders unable to fill at or beyond the band. (a) If a proposed `stop_loss.price_level` (from any specialist agent) falls outside today's computed band, set `stop_loss_override` to widen it back inside the band and flag it `may_not_be_executable: true` in the rationale — a stop placed beyond the band cannot realistically fill until the band resets the next session. (b) If the current price is within a configurable percent of either band edge (default e.g. 3%), set `jp_limit_band_flag = "limit_lock_risk"`, reduce `conviction`/approved size (e.g., halve the proposed position size), and note the limit-lock risk explicitly in the JP-ticker alert template — a locked-limit day is a realistic, JP-specific tail risk for a concentrated ¥100,000 account.
 
 **Signal score computation.** `RiskManagerAgent` does not vote directionally; instead it outputs:
 ```json
@@ -361,11 +366,12 @@ signal_score = clip(headline_score, -1, 1)
   "max_position_size_currency": 0.0,
   "stop_loss_override": {...},   // may tighten but never loosen another agent's stop
   "structural_feasibility": "ok | infeasible_lot_size | infeasible_margin_floor",
+  "jp_limit_band_flag": "none | approaching_limit | limit_lock_risk | stop_outside_band",  // JP tickers only, per rule 9; null for non-JP asset classes
   "veto_reason": "string or null"
 }
 ```
 
-**Confidence** here represents confidence in the *risk assessment itself* (data completeness on account state/constraints), not in a market call.
+**Confidence** here represents confidence in the *risk assessment itself* (data completeness on account state/constraints), not in a market call. Per the canonical propagation rule in §2.4: if any input agent's data for this ticker is `unavailable` (primary+fallback both circuit-broken), that agent abstains (`signal_score=0, confidence=0`) and `RiskManagerAgent` must itself force `risk_signal="veto"`/HOLD for that ticker rather than proceeding on a partial picture; if an input agent's data is merely `stale` (age > 2×TTL), that agent's own confidence is already capped ≤0.3 upstream, which should organically pull down the blended confidence the supervisor computes without `RiskManagerAgent` needing separate stale-data logic of its own.
 
 **Persona and prompt behavior.** Persona: **a conservative hedge-fund-style Chief Risk Officer — capital preservation first, explicitly the "adult in the room" whose job is to say no.** The system prompt should be markedly different in tone from every other agent: (1) instructed to actively look for reasons to reduce size or veto, not to find reasons to approve; (2) required to state the exact dollar risk amount and structural constraints in plain numbers every time (e.g., "risking $5.20 of $650, 0.8% of equity — within policy"); (3) explicitly forbidden from being swayed by high conviction/confidence scores from directional agents — required to state "I evaluate risk independent of how confident the other agents are"; (4) required to reference the account's small size and the research's own sober framing explicitly when relevant (e.g., "this account cannot absorb more than N consecutive losses at current sizing without material drawdown — treat that as a hard constraint, not a suggestion").
 
@@ -477,3 +483,45 @@ Thresholds (0.35, 0.50, 0.20) are deliberately conservative and should be tunabl
 `human_action_required` is always `true` and no downstream tool ever consumes this to place an order — consistent with the project's non-negotiable "never auto-execute" requirement, this output is architecturally a terminal artifact (written to a log/dashboard and optionally pushed via a Telegram/Discord alert), not an input to any execution capability that doesn't exist in this system's toolset.
 
 **Persona and prompt behavior.** Persona: **a portfolio manager/CIO synthesizing specialist analyst reports for a single decision-maker (the human operator) who must be able to trust and audit the "why."** Prompt instructions: (1) never present the blended score as more certain than its `overall_confidence` warrants — explicitly translate low-confidence bands into hedged language ("weak, low-confidence lean, not a strong call"); (2) always name which agents agreed and which conflicted, and why, using the reconciliation logic in §10.4 rather than glossing over disagreement; (3) always restate the RiskManagerAgent's position sizing/veto explicitly and prominently — this is the one piece of output the persona must never soften or bury; (4) close every output with an explicit reminder that this is analysis for manual decision-making, not an instruction, and that the project's own research indicates most systematic small-account retail trading underperforms after costs — the persona should carry forward the system-wide realistic-skepticism framing rather than resetting to hype-neutral or, worse, promotional language at the final and most human-visible step of the pipeline.
+
+---
+
+## 11. MarketRegimeAgent
+
+**What it examines.** Ambient, market-*wide* volatility/stress regime — a lightweight, non-directional gate/modifier (like `RiskManagerAgent`, never a directional voter) that reduces position-size ceilings system-wide *before* losses accrue, distinct from `RiskManagerAgent` rule 7's drawdown circuit breaker (§9), which only de-risks *after* this specific account has already drawn down ≥15%. This closes the gap the risk research flags: a VIX-equivalent spike, a broad crypto-wide deleveraging event, or a JP market-wide stress day should cut sizing ahead of realized losses, not just after them.
+
+**Inputs / data needed.**
+- **US equities**: a free VIX-equivalent level (CBOE VIX, typically obtainable free alongside other index quotes) or, if unavailable, a locally-computed realized-volatility proxy (trailing 20-day annualized realized vol of SPY) — either way, benchmarked against its own trailing 1-year daily history for percentile computation.
+- **JP equities**: a Nikkei-linked volatility index if freely obtainable, else a locally-computed trailing 20-day annualized realized-volatility proxy on TOPIX/Nikkei 225 daily returns, benchmarked against its own trailing 1-year distribution.
+- **Crypto**: trailing 20-day annualized realized volatility of BTC (or a cap-weighted basket), benchmarked against its own trailing 1-year distribution — computed locally from OHLCV already cached by other agents, no extra API needed.
+- Config-driven percentile threshold (default e.g. the 85th percentile of the trailing-1-year distribution) and the resulting de-risking multiplier (default e.g. 0.5), both tunable, not hardcoded.
+
+**Concrete rule.**
+```
+vol_percentile = percentile_rank(current_trailing_20d_realized_vol, trailing_1yr_distribution)   # per asset class, using the proxy above
+if vol_percentile >= config.regime_breaker_percentile (default 85):
+    position_size_ceiling_multiplier = config.regime_breaker_multiplier (default 0.5)
+else:
+    position_size_ceiling_multiplier = 1.0
+```
+This multiplier is computed and emitted **per asset class**, not globally — a US-equity vol spike does not automatically halve crypto sizing, and vice versa, since these regimes are sometimes but not always correlated.
+
+**Output.**
+```json
+{
+  "agent_name": "MarketRegimeAgent",
+  "asset_class": "us_equity | jp_equity | crypto",
+  "as_of_timestamp": "ISO8601 UTC",
+  "vol_percentile": 0.0,
+  "regime_breaker_active": false,
+  "position_size_ceiling_multiplier": 1.0,
+  "data_quality_flag": "ok | stale | partial | unavailable"
+}
+```
+This is intentionally not the shared per-ticker envelope in §0 — there is no `ticker`, `signal_score`, `confidence`, `stop_loss`, or `profit_target`, because this agent runs once per asset class per cycle, not once per ticker.
+
+**Mandatory consumption by RiskManagerAgent.** Per §9 rules 3 and 6, `RiskManagerAgent`'s volatility-adjusted sizing (rule 3) and correlation cap (rule 6) must each multiply their existing per-ticker outputs by this agent's `position_size_ceiling_multiplier` for the relevant asset class — as an *additional* input stacked on top of, not a replacement for, their existing per-ticker ATR-based and correlation-based logic.
+
+**Confidence / data quality.** Since this agent never scores a ticker, its "confidence" is really confidence in the vol-percentile computation itself. Per the canonical propagation rule in §2.4 (data & alerting), cap it ≤0.3 if the realized-vol history feeding the percentile is `stale`; if the underlying data is `unavailable`, fail safe by defaulting `position_size_ceiling_multiplier` to the breaker-active value (e.g. 0.5) rather than 1.0 — i.e. default toward de-risking, not toward business-as-usual, when this agent's own inputs are degraded.
+
+**Persona and prompt behavior.** This is a mechanical percentile computation, not an opinion — no LLM reasoning is strictly required to produce the multiplier itself. If an LLM wrapper is used to phrase the rationale, its persona should mirror `RiskManagerAgent`'s tone: **terse, mechanical, and explicitly indifferent to any directional agent's optimism.** Its only job is to state the current percentile, whether the breaker is active, and the resulting multiplier, e.g.: "US-equity realized vol at the 91st percentile of its trailing 1-year range — regime breaker ACTIVE, position-size ceilings halved system-wide regardless of per-ticker conviction."

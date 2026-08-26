@@ -27,11 +27,18 @@ All entries verified against free-tier terms as of August 2026. Treat every "no 
 | **Alternative.me** | Crypto | Fear & Greed Index (0–100) | REST, `api.alternative.me/fng/` | None | No published cap, poll ≤1×/hr | Free |
 | **Blockchaincenter.net** | Crypto | Altcoin Season Index (% of top-50 beating BTC over 90d) | HTML (scrape) | None | Daily update | Free |
 | **CoinGlass (dashboard)** | Crypto | Funding, OI, liquidation heatmap, Altcoin Season Index | Web dashboard (view only) | None | N/A — programmatic API is $29/mo, dashboard viewing is free | Free (manual) |
-| **Glassnode (Community tier)** | Crypto | MVRV, limited SOPR/active-address on-chain metrics (BTC/ETH) | REST, `api.glassnode.com` | Free API key | Limited metric set, coarse resolution | Free |
+| **Dune Analytics (free plan)** | Crypto | Custom-SQL on-chain analytics (EVM chains, Solana) — whale flows, exchange net-flows, and other on-chain metrics defined via query, not a fixed metric catalog | REST query-execution API, `api.dune.com` | Free account + API key | ~15 req/min (query execution), ~40 req/min (reads); 1 seat, 1 concurrent query, 30-min query timeout, queries expire after 3 months | Free |
+| **Etherscan V2 (unified multichain API)** | Crypto | Address/tx/token balances, contract ABI/source, gas oracle, supply — 60+ EVM chains under one key via `chainid` param | REST, `api.etherscan.io/v2/api` | Free API key | 3 calls/sec, up to 100,000 calls/day | Free |
 | **Finnhub** | US equities + crypto/forex | Real-time quotes, general/company news | REST, `finnhub.io/api/v1` | Free API key | ~60 calls/min (unverified live — confirm in dashboard) | Free |
 | **RSS (CoinDesk, CoinTelegraph, MarketWatch, CNBC, Yahoo Finance, Seeking Alpha, Investing.com, Japan Times, NHK Business, Yahoo Japan Business)** | All | Headlines | Standard RSS 2.0 | None | Poll hourly, be a polite client | Free |
 
-**Explicitly excluded from the design:** X/Twitter API (no free tier at all in 2026 — pure pay-per-credit), Ortex/Unusual Whales/Market Chameleon (paid, no usable free API), NewsAPI.org free tier (ToS explicitly forbids production/internal use), CoinGlass programmatic API ($29/mo). IEX Cloud is retired (2024) and should not appear in any code.
+**Explicitly excluded from the design:** X/Twitter API (no free tier at all in 2026 — pure pay-per-credit), Ortex/Unusual Whales/Market Chameleon (paid, no usable free API), NewsAPI.org free tier (ToS explicitly forbids production/internal use), CoinGlass programmatic API ($29/mo). IEX Cloud is retired (2024) and should not appear in any code. **Glassnode** is also excluded as of this writing — its free API tier appears to have been discontinued (its pricing page now lists only paid "Advanced"/"Professional" plans, no $0 option); use Dune Analytics + Etherscan V2 above for free on-chain coverage instead, and only revisit Glassnode if the project's $0 budget assumption changes. **LunarCrush** is excluded because its free "Hobby" tier is market-data-only — the social/sentiment data it's known for requires a paid plan (~$90/mo); crypto sentiment in this design comes from Alternative.me's Fear & Greed Index plus the RSS headline firehose instead.
+
+For direct exchange market data (OHLCV, funding rates, open interest), the **CCXT library** (`pip install ccxt`) is the recommended abstraction over hitting Binance/Bybit/Kraken/Coinbase REST endpoints directly — one unified interface across exchanges, still keyless for public market data, so `adapters/binance.py` etc. should be thin CCXT wrappers rather than hand-rolled REST clients per exchange.
+
+**JP-equity live-data asymmetry — no real fallback exists today.** Unlike the US leg (yfinance/Twelve Data/Tiingo, three independent live vendors) and the crypto leg (Binance + CoinGecko, two independent live vendors), the JP-equity leg has exactly one live source: the Yahoo unofficial `.T` chart endpoint. J-Quants Free is *not* a usable live fallback — its free-tier history is capped at "2 years minus the most recent 12 weeks," i.e. it structurally cannot see the last ~3 months, making it reference/backtest data only, never a same-day substitute. Concretely, this means: if the Yahoo `.T` endpoint is throttled, blocked, or otherwise circuit-broken (a real risk — it is undocumented and, per §1's framing, "increasingly anti-scraping-hardened in 2026"), **the JP-equity leg has zero live fallback and goes fully dark**, whereas a US or crypto source outage merely degrades to a second live vendor. This asymmetry is a materially higher outage risk for JP than for the other two asset classes and must be surfaced to the operator, not silently absorbed as "just another stale-cache case."
+
+**"JP data unavailable" mode (defined here; agents/orchestration reference this, not redefine it).** When the JP primary source (Yahoo `.T`) is circuit-broken and there is no live fallback to fail over to, the pipeline does **not** keep serving J-Quants-lagged or last-cached data as if it were current. Instead: (1) every JP-equity `NormalizedBar`/`NormalizedSignal` produced while the outage persists is stamped `data_quality_flag=unavailable` (per the canonical rule in §2.4 — primary AND fallback both circuit-broken); (2) per §2.4's propagation rule, every JP specialist agent consuming that ticker must abstain (`signal_score=0`, `confidence=0`) and `RiskManagerAgent` must force a HOLD/veto on that ticker — this is the "JP-degraded mode" referenced in the agents section; (3) the EOD/ops health line (§4.3) explicitly names JP as the asset class with degraded/unavailable coverage so the operator sees it, rather than the pipeline quietly going quiet. **Future improvement (not yet implemented):** evaluate a second free live JP source — e.g., Stooq's JP tickers (`http://stooq.com/q/d/l/?s=7203.jp`) — as a genuine live fallback for `jp_equity_fallback`; until that is built and verified, JP equities should be treated by the operator as running in a permanently thinner-fallback regime than US/crypto, and accepting JP degrading to a "watchlist/backtest-only" mode during an outage (recommendations paused, historical analysis still available via J-Quants/Parquet) is the honest fallback posture, not a temporary oversight.
 
 ---
 
@@ -57,13 +64,15 @@ All entries verified against free-tier terms as of August 2026. Treat every "no 
 All raw pulls land in a `raw/` staging area (JSON/CSV as returned by each vendor) and are immediately normalized into a common internal schema before anything else touches them:
 
 ```
-NormalizedBar: {symbol, exchange, asset_class, ts_utc, open, high, low, close, volume, source, ingested_at}
+NormalizedBar: {symbol, exchange, asset_class, ts_utc, open, high, low, close, volume, adjusted: bool, adjustment_factor, source, ingested_at}
 NormalizedFundamental: {symbol, period_end, metric, value, unit, source, ingested_at}
 NormalizedNewsItem: {item_id (hash of url+title), symbol_tags[], headline, summary, source, url, published_at_utc, ingested_at}
 NormalizedSignal: {symbol, asset_class, ts_utc, signal_name, score, weight, agent, params_json}
 ```
 
-A thin adapter module per vendor (`adapters/yfinance.py`, `adapters/jquants.py`, `adapters/binance.py`, …) is the *only* place vendor-specific quirks live (timezones — JST for TSE, UTC for crypto exchanges, ET for US equities; currency — JPY vs USD vs USDT; symbol conventions — `7203.T` vs `7203` vs `TM`). Everything downstream operates only on the normalized schema and UTC timestamps, converting to local display timezone only at the alert/UI layer.
+**Canonical price-adjustment convention (binding for all downstream indicator math).** yfinance, Twelve Data, Tiingo, and the Yahoo unofficial `.T` endpoint do not necessarily agree on split/dividend-adjustment across a corporate-action date, and every one of the technical-analysis agents' indicators (SMA/EMA crossovers, Bollinger, RSI-2, ADX, ATR, Donchian) is silently wrong for weeks if the series it reads flips convention mid-lookback. To prevent this, `NormalizedBar` carries two explicit fields: `adjusted: bool` (true once the row has been normalized to the canonical convention below) and `adjustment_factor` (the cumulative split/dividend multiplier applied to the vendor's raw OHLC to reach the canonical value, so raw and adjusted values are both reconstructable for audit). **The one mandated canonical convention for everything downstream of the normalization layer is fully-adjusted close** (splits and dividends both applied, matching yfinance's `auto_adjust=True`/adjusted-close behavior) — every adapter must convert its vendor's native series into this convention before a bar is allowed to leave `raw/` and land in the Parquet lake or SQLite cache; no agent or backtest ever reads a mixed-convention series. **Adapter-level test requirement:** each source adapter (`adapters/yfinance.py`, `adapters/twelvedata.py`, `adapters/tiingo.py`, `adapters/jquants.py`, `adapters/yahoo_unofficial_jp.py`, …) must ship a regression test that pulls a known historical split date for a liquid symbol (e.g., a past US or JP stock split) and asserts price continuity across the split boundary once normalized — an adapter that fails this test is not permitted into the ingestion cadence in §2.1 until fixed.
+
+A thin adapter module per vendor (`adapters/yfinance.py`, `adapters/jquants.py`, `adapters/binance.py`, …) is the *only* place vendor-specific quirks live (timezones — JST for TSE, UTC for crypto exchanges, ET for US equities; currency — JPY vs USD vs USDT; symbol conventions — `7203.T` vs `7203` vs `TM`; and the adjustment normalization above). Everything downstream operates only on the normalized schema and UTC timestamps, converting to local display timezone only at the alert/UI layer.
 
 ### 2.3 Local storage
 
@@ -92,6 +101,11 @@ data/
 - **Read-through disk cache** (e.g., `diskcache` library or plain JSON files with a TTL column) keyed by `(source, endpoint, params_hash)`, with TTL matched to the ingestion cadence in §2.1 (e.g., a J-Quants pull is cached for 24h; a Binance funding-rate pull for 5 min). This means a crashed/retried job or an ad-hoc agent query never issues a duplicate live call within the TTL window.
 - **Backoff on 429/5xx**: exponential backoff (base 2s, capped at 5 min) with jitter, specifically because yfinance, the Yahoo `.T` endpoint, and Stooq are documented to throttle unpredictably in 2026; a hard circuit-breaker (skip source for the rest of the run, log a warning) prevents one flaky vendor from stalling the whole scheduled job.
 - **Batching**: wherever a vendor supports multi-symbol or wide-date-range calls in one request (Alpha Vantage's `EARNINGS_CALENDAR` CSV sweep, Twelve Data batch quotes), the pipeline always prefers one wide call over many narrow ones to conserve the daily/per-minute budget.
+- **Canonical `data_quality_flag` propagation rule (this is the authoritative definition — the agents and orchestration sections reference these rules rather than restating or redefining them):**
+  - `data_quality_flag=stale`: set whenever a value served from the read-through cache has age (now − `ingested_at`) exceeding **2× its configured TTL** for that source/endpoint (the TTLs are the ones defined earlier in this subsection, e.g. 24h for J-Quants, 5 min for Binance funding). Any agent consuming a `stale`-flagged input **must cap its own confidence at ≤0.3** for that signal, regardless of how strong the raw score looks.
+  - `data_quality_flag=unavailable`: set whenever **both** a source's primary adapter **and** its configured fallback are circuit-broken (per the backoff/circuit-breaker behavior above) at the time a value is requested — i.e., there is no live or cached-within-2×TTL value to serve at all. Any agent consuming an `unavailable`-flagged input **must abstain**: emit `signal_score=0, confidence=0` rather than guessing, and `RiskManagerAgent` **must force a HOLD/veto** for that ticker until the flag clears. The JP-equity "JP data unavailable" mode described in §1 is the concrete worked example of this rule (JP has no live fallback, so a primary-source outage there goes straight to `unavailable`, not merely `stale`).
+  - `data_quality_flag=partial`: reserved for values assembled from an incomplete batch/multi-symbol response (e.g., a batched quote call that returned data for 18 of 20 requested symbols); does not by itself force an abstain, but agents should treat it as a mild confidence penalty at their own discretion.
+  - A Phase-1 regression test must assert this propagation end-to-end: feed a mock adapter that is stale-by->2×TTL and one that is fully circuit-broken (primary+fallback), and confirm the resulting agent output matches the confidence-cap / abstain-and-veto behavior above.
 
 ---
 
@@ -186,6 +200,21 @@ Crypto: BTC HOLD (0.15, F&G=81 extreme greed, tighten stops) | ETH BUY (0.44)
 Pipeline health: J-Quants OK, EDINET OK, Binance OK, yfinance 2 retries (recovered)
 ```
 
+**Monthly performance-reality digest (email, alongside the existing weekly/monthly recalibration cadence defined in `risk & validation` §6 — this alert is the operational surfacing of that cadence, not a separate schedule):** sent once a month regardless of how the month went, specifically to counter overconfidence after a lucky streak or excessive discouragement after a losing one, by putting the realized numbers next to the aspiration every single month rather than leaving that comparison in a static document the operator stops re-reading.
+```
+Monthly Performance Reality Check — August 2026
+Realized since inception: CAGR (annualized) 11.4% | Sharpe 0.6 | Sortino 0.8 | Max DD -9.2%
+Trailing 3mo: CAGR 14.0% | Sharpe 0.7 | 24 closed trades | hit rate 46%
+
+Aspiration on record: 50%+ account growth (~¥100,000 → ~¥150,000+).
+Reality check: your realized CAGR/Sharpe above are the numbers that matter, not the
+aspiration. Per `risk & validation` §7: 97% of persistent retail day traders in the
+Brazilian full-population study lost money; a systematic strategy that survives years
+typically runs Sharpe ~1-2 and CAGR ~15-40%/yr; 50%+ in months is a low-probability
+tail outcome, not something to size or emotionally anchor on. Treat this system's
+goal as capital preservation + demonstrated statistically-significant edge first.
+```
+
 ### 4.4 What never triggers an alert or an action
 
 Consistent with the "no auto-execution" requirement: alerts are informational only, no alert payload contains an executable order, no channel/bot has write-back capability into a broker/exchange account, and the human-in-the-loop checkpoint (per the orchestration design) gates even the *writing* of a recommendation to the log/alert layer — the pipeline can compute scores continuously, but nothing gets pushed to Telegram/Discord without passing that checkpoint.
@@ -207,6 +236,7 @@ Implemented via **APScheduler 3.x** (the 4.0 line is still alpha as of Aug 2026 
 | **End-of-day summary** | 16:30 ET (US), 15:30 JST (JP), and 00:00 UTC (crypto daily rollup) | Persist the day's closing scores/positions to the SQLite memory store, send the EOD digest (§4.3) |
 | **Overnight backfill/cache refresh** | 02:00 local machine time | Pull any missed bars, refresh fundamentals for tickers due for weekly refresh, prune `raw/` cache older than 30 days |
 | **Weekly seasonality refresh** | Sunday 18:00 local | Recompute day-of-week/turn-of-month/sector-rotation buckets and PEAD/SUE rankings against the latest week of data; refresh the DuckDB/Parquet-derived seasonality tables used by the technical-analysis agents |
+| **Monthly performance-reality digest** | 1st of month, 09:00 local | Send the §4.3 realized-CAGR/Sharpe-vs-aspiration email so the 50%+ aspiration is re-surfaced against actuals every month, not left in a static document |
 | **Rate-limit ledger audit / health check** | Daily, 00:05 local | Verify no source exceeded budget in the prior 24h, alert (Discord ops channel) if any adapter has been failing beyond its retry/backoff window |
 
 ---
