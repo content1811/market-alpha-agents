@@ -91,12 +91,18 @@ def call_structured(
     user_prompt: str,
     schema: type[T],
     llm=None,
-    max_repair_attempts: int = 1,
+    max_repair_attempts: int = 2,
 ) -> T:
     """Call an LLM and parse+validate its reply against `schema`, retrying
-    once with a repair prompt on validation failure -- per the Phase 2 test
+    with a repair prompt on validation failure -- per the Phase 2 test
     requirement in section_orchestration.md section 3 ("the LLM call always
     returns schema-valid JSON (retry-with-repair on validation failure)").
+    Default raised from 1 to 2 repair attempts (3 total) after a live,
+    observed transient failure: a real PortfolioSupervisorAgent call failed
+    schema validation on both the initial attempt and a single repair attempt
+    in the same run, then succeeded cleanly on an immediate retry of the whole
+    call -- i.e. the gateway/model occasionally misses twice in a row, not
+    just once, so 1 repair attempt was not always enough headroom.
     """
     if llm is None:
         llm = build_primary_llm()

@@ -73,7 +73,7 @@ def test_exhausting_repair_attempts_raises():
     from agents.llm_client import LLMCallError
 
     bars = _synthetic_bars()
-    llm = FakeLLM(responses=["still not json", "still not json either"])
+    llm = FakeLLM(responses=["still not json", "still not json either", "still not json a third time"])
 
     with pytest.raises(LLMCallError):
         build_verdict("FAKE", AssetClass.US_EQUITY, bars, llm=llm)

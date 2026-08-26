@@ -36,9 +36,9 @@ def test_news_sentiment_agent_over_length_rationale_gets_truncated_not_failed():
     bad_response = json.dumps(
         {"scores": [{"sentiment": 0.1, "relevance": 0.5}, {"sentiment": 0.1, "relevance": 0.5}], "rationale": over_long_rationale}
     )
-    # both repair attempts return the same over-length rationale -- the
+    # every repair attempt returns the same over-length rationale -- the
     # llm_client's word-boundary truncation fallback must still succeed.
-    llm = FakeLLM(responses=[bad_response, bad_response])
+    llm = FakeLLM(responses=[bad_response, bad_response, bad_response])
 
     verdict = build_verdict("X", AssetClass.US_EQUITY, headlines=SAMPLE_HEADLINES, llm=llm)
     assert len(verdict.rationale) <= 280
