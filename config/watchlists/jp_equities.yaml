@@ -1,0 +1,9 @@
+# Starter TSE watchlist, using Yahoo-style .T tickers. Note the 100-share
+# (tangen kabu) unit-size constraint from section_risk_validation.md section 2 --
+# a JPY100,000 account cannot afford full lots in most large-cap names, so this
+# list favors lower-priced or mini-kabu-eligible names for initial testing.
+symbols:
+  - symbol: 7203.T   # Toyota
+  - symbol: 9984.T   # SoftBank Group
+  - symbol: 8306.T   # Mitsubishi UFJ
+  - symbol: 6758.T   # Sony Group

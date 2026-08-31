@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  NOT YET INSTALLED, deliberately. scripts/run_daily_scan.py now exists and
+  runs cleanly end-to-end (see README's "Where things stand"), so this is no
+  longer blocked on a missing script -- it's still a manual `cp` +
+  `launchctl load` step because starting an unattended nightly job is an
+  operator decision, not a default (it writes real rows to
+  storage/recommendations.db on every run; it does NOT send any alert by
+  itself -- see ui/review_cli.py and MANUAL.md's approval-gate section for
+  why sending still always requires a human running `review_cli.py approve`
+  by hand, even on a scheduled run).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.marketalpha.dailyrun</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/prabhatkumar.singh/Downloads/experiments/market-alpha-agents/.venv/bin/python</string>
+        <string>/Users/prabhatkumar.singh/Downloads/experiments/market-alpha-agents/scripts/run_daily_scan.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/prabhatkumar.singh/Downloads/experiments/market-alpha-agents</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>16</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/prabhatkumar.singh/Downloads/experiments/market-alpha-agents/logs/daily_scan.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/prabhatkumar.singh/Downloads/experiments/market-alpha-agents/logs/daily_scan.err.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

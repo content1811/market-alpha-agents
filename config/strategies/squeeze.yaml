@@ -1,0 +1,27 @@
+# ShortSqueezeAgent tunables. See docs/plan/section_agents.md section 4.
+# squeeze_score = weighted_avg(si_score, dtc_score, fee_score, util_score, options_score)
+weights:
+  si_score: 0.30
+  dtc_score: 0.20
+  fee_score: 0.25
+  util_score: 0.15
+  options_score: 0.10
+thresholds:
+  si_pct_float_divisor: 40      # si_score = clip(SI%/40, 0, 1)
+  si_pct_elevated: 15
+  si_pct_high: 30
+  days_to_cover_divisor: 10
+  days_to_cover_elevated: 5
+  days_to_cover_high: 10
+  borrow_fee_rate_divisor: 50
+  borrow_fee_elevated: 5
+  borrow_fee_extreme: 50
+  utilization_offset: 80
+  utilization_scale: 20
+  options_vol_oi_ratio_min: 1.25   # Barchart methodology
+  options_min_volume: 500
+  options_min_open_interest: 100
+  rvol_confirmation_multiple: 5
+confidence_caps:
+  lagged_finra_only: 0.4
+  jp_degraded_mode: 0.2

@@ -1,0 +1,143 @@
+# Master config. No real secrets here -- every key is ${VAR_NAME} interpolated
+# from the environment (.env, gitignored). See docs/plan/section_orchestration.md
+# section 5 for the design rationale of every block below.
+
+system:
+  environment: local
+  timezone: Asia/Tokyo
+  log_level: INFO
+  storage:
+    recommendations_db: storage/recommendations.db
+    outcomes_db: storage/outcomes.db
+    checkpoint_db: orchestration/checkpoints.db
+    state_db: data/state.db
+    news_db: data/news.db
+
+asset_classes:
+  us_equity:
+    enabled: true
+    watchlist_file: config/watchlists/us_equities.yaml
+    strategy_files:
+      - config/strategies/mean_reversion.yaml
+      - config/strategies/trend_momentum.yaml
+      - config/strategies/seasonality.yaml
+      - config/strategies/squeeze.yaml
+  jp_equity:
+    enabled: false  # disabled per operator preference -- J-Quants/EDINET not registered and not wanted right now
+    watchlist_file: config/watchlists/jp_equities.yaml
+    strategy_files:
+      - config/strategies/mean_reversion.yaml
+      - config/strategies/trend_momentum.yaml
+    notes: >
+      J-Quants free tier is 12 weeks lagged; treat as reference/backtest data
+      only, never a live signal. The Yahoo unofficial .T endpoint is the only
+      live source for this asset class -- there is no real live fallback today
+      (see docs/plan/section_data_pipeline.md section 1, "JP-equity live-data
+      asymmetry"). jp_equity_fallback below intentionally lists the same
+      source as jp_equity_primary for this reason, not by mistake.
+  crypto:
+    enabled: true
+    watchlist_file: config/watchlists/crypto.yaml
+    strategy_files:
+      - config/strategies/crypto_factors.yaml
+
+crypto_onchain:
+  # CryptoOnChainAgent's flow_score/whale_score (data/onchain_fetch.py) need
+  # real ETH wallet addresses to track -- empty by default because correctly
+  # labeling a real exchange/whale wallet isn't something to guess at without
+  # independent verification (see data/onchain_fetch.py's module docstring).
+  # Add addresses you've verified yourself (e.g. via Etherscan's own public
+  # label tags) to get real signal here instead of an excluded sub-score.
+  exchange_addresses: []
+  whale_addresses: []
+
+data_sources:
+  us_equity_primary: yfinance
+  us_equity_fallback: [twelvedata, tiingo]
+  jp_equity_primary: jquants_free
+  jp_equity_fallback: [yahoo_unofficial]   # see notes above -- not a real independent fallback
+  crypto_ohlcv: ccxt_binance_public
+  api_keys:
+    alpha_vantage: ${ALPHA_VANTAGE_API_KEY}
+    twelvedata: ${TWELVEDATA_API_KEY}
+    tiingo: ${TIINGO_API_KEY}
+    finnhub: ${FINNHUB_API_KEY}
+    jquants: ${JQUANTS_API_KEY}
+    edinet: ${EDINET_SUBSCRIPTION_KEY}
+    coingecko: ${COINGECKO_API_KEY}
+    dune: ${DUNE_API_KEY}
+    etherscan: ${ETHERSCAN_API_KEY}
+  rate_limits:
+    alpha_vantage_per_day: 25
+    jquants_per_min: 5
+    twelvedata_per_day: 800
+    twelvedata_per_min: 8
+    tiingo_per_day: 1000
+    sec_edgar_per_sec: 10
+    coingecko_per_min: 100
+    dune_execute_per_min: 15
+    dune_read_per_min: 40
+    etherscan_per_sec: 3
+    etherscan_per_day: 100000
+
+thresholds:
+  min_conviction_to_alert: 0.5
+  min_confidence_to_alert: 0.4
+  adx_trend_cutoff: 22
+  short_squeeze_watch_score: 0.6
+  risk_veto_conviction: 0.7
+  disagreement_penalty_cap: 0.6
+
+risk_management:
+  account_equity_jpy: 100000
+  max_risk_per_trade_pct: 1.0
+  kelly_fraction_cap: 0.25
+  stop_loss_method: atr_multiple
+  atr_stop_multiple_swing: 2.5
+  atr_stop_multiple_daytrade: 1.5
+  max_position_pct_of_equity: 20.0
+  drawdown_circuit_breaker_pct: 15.0
+  correlated_exposure_multiple_cap: 1.5
+
+schedules:
+  daily_scan:
+    cron: "0 30 16 * * MON-FRI"
+    scheduler: apscheduler_3
+  news_poll:
+    interval_minutes: 5
+  weekly_robustness_check:
+    cron: "0 0 8 * * SUN"
+
+alerting:
+  channels:
+    telegram:
+      enabled: true
+      bot_token: ${TELEGRAM_BOT_TOKEN}
+      chat_id: ${TELEGRAM_CHAT_ID}
+    desktop_notification:
+      enabled: true
+    email:
+      enabled: false
+  never_auto_execute: true   # documentation flag only -- the real guarantee is
+                              # the absence of any execution tool anywhere in code
+
+llm:
+  provider: rakuten_gateway         # Claude via the same internal gateway used by
+                                    # ../Server_failure/rakuten-failure-agent -- see
+                                    # agents/llm_client.py for the live-verified
+                                    # construction quirks (temperature unsupported,
+                                    # max_tokens=128000, streaming required).
+  model: ${LLM_MODEL}               # defaults to claude-sonnet-5 per .env.example
+  temperature: null                 # claude-sonnet-5 rejects this param (400) -- never sent
+  fallback_provider: ollama         # local, free, no key needed (qwen2.5:7b already pulled)
+  fallback_model: qwen2.5:7b
+
+backtesting:
+  walk_forward:
+    window_type: rolling
+    in_sample_days: 252
+    out_of_sample_days: 63
+  robustness_gates:
+    min_deflated_sharpe: 0.5
+    max_pbo: 0.4
+    min_track_record_days: 180

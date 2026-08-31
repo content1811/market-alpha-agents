@@ -1,0 +1,5 @@
+# Starter crypto watchlist (CCXT unified symbols, Binance public spot market).
+symbols:
+  - symbol: BTC/USDT
+  - symbol: ETH/USDT
+  - symbol: SOL/USDT
