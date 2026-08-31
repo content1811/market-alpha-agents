@@ -23,6 +23,8 @@ from pydantic import BaseModel, Field
 
 from agents.llm_client import call_structured
 from agents.schemas import AgentVerdict, HoldingPeriod, ProfitTarget, StopLoss
+from alerting.news_watch.sentiment_finbert import is_relevant, score_headlines_bulk
+from data.connectors.news_finnhub import fetch_finnhub_company_news
 from data.schema import AssetClass
 from signals.news_sentiment import ScoredHeadline, compute_news_sentiment
 
@@ -91,7 +93,28 @@ def fetch_headlines(asset_class: AssetClass, ticker_keywords: list[str], lookbac
                     "item_id": hashlib.sha256((entry.get("link", "") + title).encode()).hexdigest()[:16],
                 }
             )
+
+    if asset_class == AssetClass.US_EQUITY and ticker_keywords:
+        seen_ids = {h["item_id"] for h in headlines}
+        for h in fetch_finnhub_company_news(ticker_keywords[0], lookback_hours=lookback_hours):
+            if h["item_id"] not in seen_ids:
+                headlines.append(h)
+                seen_ids.add(h["item_id"])
+
     return headlines
+
+
+def _finbert_prefilter(headlines: list[dict]) -> list[dict]:
+    """Local FinBERT first pass (section_orchestration.md Phase 5 / section_
+    data_pipeline.md section 3.2 step 3): drop headlines FinBERT is confident
+    are neutral noise before paying for the expensive per-headline LLM call
+    below. Degrades to "score everything" if FinBERT is unavailable for any
+    reason, matching every other graceful-degradation pattern already in this
+    codebase (e.g. alerting/telegram_bot.py's send_telegram_message)."""
+    scores = score_headlines_bulk([h["title"] for h in headlines])
+    if scores is None:
+        return headlines
+    return [h for h, s in zip(headlines, scores) if is_relevant(s)]
 
 
 def build_verdict(
@@ -105,6 +128,9 @@ def build_verdict(
         headlines = fetch_headlines(asset_class, ticker_keywords or [ticker])
 
     is_jp = asset_class == AssetClass.JP_EQUITY
+
+    if headlines:
+        headlines = _finbert_prefilter(headlines)
 
     if not headlines:
         return AgentVerdict(

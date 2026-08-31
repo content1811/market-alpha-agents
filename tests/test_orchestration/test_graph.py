@@ -13,7 +13,7 @@ import json
 import pytest
 
 from data.connectors.us_equities_yfinance import YFinanceSource
-from orchestration.graph import build_graph, run_for_ticker
+from orchestration.graph import build_graph, resume_for_ticker, run_for_ticker
 from tests.test_agents.test_mean_reversion_agent import FakeLLM
 
 RATIONALE_RESPONSE = json.dumps({"rationale": "Test rationale citing the computed numbers, under any length limit."})
@@ -75,3 +75,105 @@ def test_graph_checkpoints_and_resumes():
         assert len(resumed_checkpoints) == len(checkpoints)
         latest_state = resumed_checkpoints[0].checkpoint["channel_values"]
         assert latest_state.get("supervisor_verdict") is not None
+
+
+@pytest.mark.network
+def test_graph_runs_crypto_ticker_with_squeeze_skipped_and_derivatives_onchain_active():
+    from data.connectors.crypto_ccxt import CCXTSource
+    from data.connectors.crypto_derivatives_live import fetch_derivatives_inputs
+    from data.schema import AssetClass
+
+    source = CCXTSource()
+    bars = source.get_ohlcv("BTC/USDT", lookback_days=300)
+    proxy_bars = bars  # BTC is its own market-regime proxy per market_regime_agent.py
+
+    derivatives_inputs = fetch_derivatives_inputs("BTC/USDT")
+    onchain_inputs = {
+        "mvrv": None, "sopr_score": None, "flow_score": None,
+        "whale_score": None, "addr_divergence_score": None, "unlock_penalty": 0.0,
+    }
+    llm = FakeLLM(responses=[RATIONALE_RESPONSE] * 10)
+
+    final_state = run_for_ticker(
+        "BTC/USDT", AssetClass.CRYPTO, bars, proxy_bars, equity=100_000, as_of_date="2026-08-26",
+        llm=llm, crypto_funding_rate_history=derivatives_inputs["funding_rate_history"],
+        crypto_current_oi=derivatives_inputs["current_oi"], crypto_prior_oi=derivatives_inputs["prior_oi"],
+        crypto_onchain_inputs=onchain_inputs,
+    )
+
+    agent_names = {v["agent_name"] for v in final_state["verdicts"]}
+    assert "ShortSqueezeAgent" not in agent_names
+    assert "CryptoDerivativesAgent" in agent_names
+    assert "CryptoOnChainAgent" in agent_names
+    assert final_state["supervisor_verdict"]["asset_class"] == "crypto"
+
+
+def test_graph_equity_ticker_still_skips_crypto_nodes():
+    """No live call needed -- crypto nodes must no-op purely from
+    asset_class/missing-inputs, without ever touching a crypto connector for
+    an equity ticker."""
+    from data.schema import AssetClass, NormalizedBar
+    from datetime import datetime, timezone
+
+    bars = [
+        NormalizedBar(
+            symbol="AAPL", asset_class=AssetClass.US_EQUITY, ts_utc=datetime.now(timezone.utc),
+            open=price, high=price + 1.0, low=price - 1.0, close=price, volume=1_000_000.0, adjusted=True,
+            source="fake", ingested_at=datetime.now(timezone.utc),
+        )
+        for i in range(300)
+        for price in [100.0 + (i % 11) - (i % 5)]  # deterministic non-zero variance, avoids a std=0 NaN
+    ]
+    llm = FakeLLM(responses=[RATIONALE_RESPONSE] * 10)
+
+    final_state = run_for_ticker("AAPL", AssetClass.US_EQUITY, bars, bars, equity=100_000, as_of_date="2026-08-26", llm=llm)
+
+    agent_names = {v["agent_name"] for v in final_state["verdicts"]}
+    assert "CryptoDerivativesAgent" not in agent_names
+    assert "CryptoOnChainAgent" not in agent_names
+
+
+def test_graph_has_no_edge_from_supervisor_directly_to_end():
+    """The single most important regression test in this system, per
+    docs/plan/section_orchestration.md section 3 Phase 7: no recommendation
+    may ever reach END (and therefore be eligible for alerting/) without
+    passing through approval_gate's interrupt() first. Asserted structurally
+    against the compiled graph's own edge list, not just by convention."""
+    app = build_graph().compile()
+    edges = {(edge.source, edge.target) for edge in app.get_graph().edges}
+
+    assert ("supervisor", "__end__") not in edges
+    assert ("supervisor", "approval_gate") in edges
+    assert ("approval_gate", "__end__") in edges
+
+
+@pytest.mark.network
+def test_graph_pauses_at_approval_gate_until_resumed():
+    import sqlite3
+    import tempfile
+    from pathlib import Path
+
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    from data.schema import AssetClass
+
+    source = YFinanceSource()
+    bars = source.get_ohlcv("AAPL", lookback_days=300)
+    proxy_bars = source.get_ohlcv("SPY", lookback_days=300)
+    llm = FakeLLM(responses=[RATIONALE_RESPONSE] * 10)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        conn = sqlite3.connect(str(Path(tmpdir) / "checkpoints.db"), check_same_thread=False)
+        checkpointer = SqliteSaver(conn)
+
+        first_pass = run_for_ticker(
+            "AAPL", AssetClass.US_EQUITY, bars, proxy_bars, equity=100_000,
+            as_of_date="2026-08-26", checkpointer=checkpointer, llm=llm,
+        )
+        assert "__interrupt__" in first_pass
+        assert first_pass["human_decision"] is None
+        assert first_pass["supervisor_verdict"] is not None  # already written before the pause
+
+        resumed = resume_for_ticker("AAPL-2026-08-26", "approved", checkpointer, llm=llm)
+        assert "__interrupt__" not in resumed
+        assert resumed["human_decision"] == "approved"

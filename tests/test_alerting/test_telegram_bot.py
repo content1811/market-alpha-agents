@@ -1,7 +1,9 @@
-"""Tests for alerting/telegram_bot.py. Not configured in this environment
-(no TELEGRAM_BOT_TOKEN registered) -- confirmed live that it reports that
-state cleanly rather than crashing; these tests mock the HTTP layer to cover
-the configured path without needing a real bot token."""
+"""Tests for alerting/telegram_bot.py. TELEGRAM_BOT_TOKEN/CHAT_ID are now real
+(live-verified: a real message was sent and confirmed delivered), so every
+test here passes explicit TelegramSettings(...) values rather than relying on
+TelegramSettings() picking up an unset env var -- the "not configured" path
+must be tested by explicitly passing None, not by assuming the environment
+has nothing set."""
 from __future__ import annotations
 
 from alerting.telegram_bot import MAX_MESSAGE_LENGTH, TelegramSettings, is_configured, send_telegram_message
@@ -16,7 +18,7 @@ def test_is_configured_true_when_both_set():
 
 
 def test_send_returns_false_when_not_configured():
-    assert send_telegram_message("hello", TelegramSettings()) is False
+    assert send_telegram_message("hello", TelegramSettings(telegram_bot_token=None, telegram_chat_id=None)) is False
 
 
 def test_send_returns_true_on_success(monkeypatch):

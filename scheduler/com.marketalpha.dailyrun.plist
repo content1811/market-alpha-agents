@@ -1,12 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  NOT YET INSTALLED. This is a template for Phase 6 (Paper-Trading Dry Run),
-  once scripts/run_daily_scan.py exists -- see docs/plan/section_orchestration.md
-  section 3. Installing a launchd agent for a script that doesn't exist yet
-  would just fail silently on every scheduled tick, so this is left as a
-  template to `cp` into ~/Library/LaunchAgents/ and `launchctl load` when that
-  script is ready, not something this setup phase installs automatically.
+  NOT YET INSTALLED, deliberately. scripts/run_daily_scan.py now exists and
+  runs cleanly end-to-end (see README's "Where things stand"), so this is no
+  longer blocked on a missing script -- it's still a manual `cp` +
+  `launchctl load` step because starting an unattended nightly job is an
+  operator decision, not a default (it writes real rows to
+  storage/recommendations.db on every run; it does NOT send any alert by
+  itself -- see ui/review_cli.py and MANUAL.md's approval-gate section for
+  why sending still always requires a human running `review_cli.py approve`
+  by hand, even on a scheduled run).
 -->
 <plist version="1.0">
 <dict>

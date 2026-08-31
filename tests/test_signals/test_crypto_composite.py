@@ -80,3 +80,27 @@ def test_compute_onchain_hand_computed():
 def test_compute_onchain_bounds():
     result = compute_onchain(mvrv=10.0, sopr_score=-100, flow_score=-100, whale_score=-100, addr_divergence_score=-100, unlock_penalty=-100)
     assert -1.0 <= result.signal_score <= 1.0
+
+
+def test_compute_onchain_excludes_none_inputs_and_renormalizes():
+    # Only unlock_penalty (weight 0.10, always required) is "available" --
+    # mirrors CryptoOnChainAgent's real v1 state before its local ledger has
+    # accumulated any flow/whale history and with no free MVRV/SOPR source.
+    result = compute_onchain(
+        mvrv=None, sopr_score=None, flow_score=None, whale_score=None, addr_divergence_score=None, unlock_penalty=0.0
+    )
+    assert result.excluded == ["mvrv", "sopr", "flow", "whale", "addr_divergence"]
+    assert result.signal_score == pytest.approx(0.0)
+    assert result.confidence == pytest.approx(0.06)  # 0.6 * total_weight(0.10)
+
+
+def test_compute_onchain_partial_availability_renormalizes_not_guesses():
+    # mvrv (0.30) + unlock (0.10) available -> total_weight=0.40.
+    # onchain_raw = 0.30*70 (mvrv=1.5 -> accumulation band) + 0.10*0 = 21
+    # signal_score = 21 / 0.40 / 100 = 0.525
+    result = compute_onchain(
+        mvrv=1.5, sopr_score=None, flow_score=None, whale_score=None, addr_divergence_score=None, unlock_penalty=0.0
+    )
+    assert result.excluded == ["sopr", "flow", "whale", "addr_divergence"]
+    assert result.signal_score == pytest.approx(0.525)
+    assert result.confidence == pytest.approx(0.24)  # 0.6 * total_weight(0.40)

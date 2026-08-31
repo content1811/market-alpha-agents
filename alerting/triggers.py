@@ -1,15 +1,20 @@
 """Alert trigger detection + dedup, per section_data_pipeline.md section 4.1.
 
 Implemented here: composite-signal-crosses-threshold, squeeze-risk flag,
-stop/target proximity, RVOL+price-spike, and filing-match (given
-already-fetched EDGAR/TDnet results). NOT implemented yet (scoped out, not
-silently skipped): upcoming-token-unlock and sentiment-extreme+open-exposure
-both need data this system doesn't fetch yet (unlock calendars need
-CryptoOnChainAgent's still-deferred connector; Fear&Greed needs a new,
-currently-unwired Alternative.me integration); earnings-date-approaching and
-data-pipeline-failure are Phase 6/7 operational concerns (a live scheduled
-run has an earnings calendar and pipeline health to check against -- this
-module's job is the trigger/dedup mechanics, not sourcing that live state).
+stop/target proximity, RVOL+price-spike, filing-match (given already-fetched
+EDGAR/TDnet results), upcoming-token-unlock, and sentiment-extreme.
+upcoming-token-unlock and sentiment-extreme are now fed by
+data/connectors/defillama_unlocks.py (a paid DefiLlama Pro-API connector --
+see that module's docstring for the live 2026-08-31 verification that this
+turned out not to be free/keyless as originally assumed) and
+data/connectors/alternative_me.py (free, keyless Fear&Greed Index),
+respectively; per every other trigger function in this file, both take
+pre-computed numeric inputs rather than reaching into those connectors
+themselves. NOT implemented yet (scoped out, not silently skipped):
+earnings-date-approaching and data-pipeline-failure are Phase 6/7
+operational concerns (a live scheduled run has an earnings calendar and
+pipeline health to check against -- this module's job is the trigger/dedup
+mechanics, not sourcing that live state).
 """
 from __future__ import annotations
 
@@ -61,6 +66,40 @@ def rvol_price_spike(rvol: float, same_bar_return_pct: float, is_crypto: bool = 
 def filing_match(form_type: str, is_material_event: bool) -> TriggeredAlert:
     severity: Severity = "high" if is_material_event else "medium"
     return TriggeredAlert("filing_match", "", severity, f"{form_type} filed, material={is_material_event}")
+
+
+def upcoming_unlock(pct_of_supply: float, multiple_of_adv: float) -> TriggeredAlert | None:
+    """Per docs/plan/section_agents.md section 6 indicator #6 ("Unlock
+    schedule"): forward 30-day unlock size as % of circulating supply and
+    multiple of 30-day ADV. Thresholds exactly as documented there --
+    `<1% supply & <5x ADV` = negligible (no alert); `2-5% or >20x ADV` =
+    medium; `>5% single cliff` = high. `>5%` and `>20x` are strictly
+    greater-than per that doc's own wording, so pct_of_supply==5.0 or
+    multiple_of_adv==20.0 land in the medium bucket, not high/negligible.
+    Note the doc leaves a gap between the negligible and medium bands (e.g.
+    pct_of_supply=1.0 with multiple_of_adv=5.0 satisfies neither "<1% & <5x"
+    nor "2-5% or >20x") -- this function does not invent a threshold for
+    that gap and returns None (no alert) for it, same as the negligible
+    case, rather than guessing a boundary the plan doesn't specify."""
+    if pct_of_supply > 5:
+        return TriggeredAlert("upcoming_unlock", "", "high", f"unlock={pct_of_supply:.1f}% of supply (single cliff)")
+    if 2 <= pct_of_supply <= 5 or multiple_of_adv > 20:
+        return TriggeredAlert(
+            "upcoming_unlock", "", "medium", f"unlock={pct_of_supply:.1f}% of supply, {multiple_of_adv:.1f}x ADV"
+        )
+    return None
+
+
+def sentiment_extreme(fng_value: int, low_threshold: int = 20, high_threshold: int = 80) -> TriggeredAlert | None:
+    """Fires on either extreme of the Alternative.me Fear & Greed Index
+    (data/connectors/alternative_me.py), medium severity either way -- an
+    extreme reading is a contrarian flag to review open exposure, not a
+    directional call in itself, so it doesn't warrant "high" on its own."""
+    if fng_value <= low_threshold:
+        return TriggeredAlert("sentiment_extreme", "", "medium", f"Fear&Greed={fng_value} (extreme fear)")
+    if fng_value >= high_threshold:
+        return TriggeredAlert("sentiment_extreme", "", "medium", f"Fear&Greed={fng_value} (extreme greed)")
+    return None
 
 
 class AlertDeduplicator:

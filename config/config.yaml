@@ -23,7 +23,7 @@ asset_classes:
       - config/strategies/seasonality.yaml
       - config/strategies/squeeze.yaml
   jp_equity:
-    enabled: true
+    enabled: false  # disabled per operator preference -- J-Quants/EDINET not registered and not wanted right now
     watchlist_file: config/watchlists/jp_equities.yaml
     strategy_files:
       - config/strategies/mean_reversion.yaml
@@ -40,6 +40,16 @@ asset_classes:
     watchlist_file: config/watchlists/crypto.yaml
     strategy_files:
       - config/strategies/crypto_factors.yaml
+
+crypto_onchain:
+  # CryptoOnChainAgent's flow_score/whale_score (data/onchain_fetch.py) need
+  # real ETH wallet addresses to track -- empty by default because correctly
+  # labeling a real exchange/whale wallet isn't something to guess at without
+  # independent verification (see data/onchain_fetch.py's module docstring).
+  # Add addresses you've verified yourself (e.g. via Etherscan's own public
+  # label tags) to get real signal here instead of an excluded sub-score.
+  exchange_addresses: []
+  whale_addresses: []
 
 data_sources:
   us_equity_primary: yfinance

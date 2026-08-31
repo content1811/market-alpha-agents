@@ -48,6 +48,37 @@ class CCXTSource(DataSource):
             )
         return bars
 
+    def get_funding_rate_history(self, symbol: str, since_ms: int, limit_per_call: int = 1000) -> list[dict]:
+        """Paginated fetch of a perpetual future's funding-rate history via
+        CCXT's unified fetch_funding_rate_history -- keyless, verified live
+        against Binance's public endpoint (goes back to that market's 2019
+        launch; a single call caps out well short of that, so this pages
+        forward from `since_ms` by re-querying with the last returned
+        timestamp+1 until it catches up to "now"). `symbol` must be the
+        unified perpetual-swap symbol (e.g. "BTC/USDT:USDT"), not the spot
+        symbol get_ohlcv() takes. Funding prints every 8h for USDT-margined
+        perpetuals (periods_per_day=3), matching
+        signals/crypto_composite.py's compute_crypto_derivatives/
+        crypto_derivatives_funding_signal_series default. Returns
+        {"timestamp" (ms, UTC), "funding_rate"} dicts, oldest first.
+        """
+        all_rows: list[dict] = []
+        cursor = since_ms
+        while True:
+            batch = self._exchange.fetch_funding_rate_history(symbol, since=cursor, limit=limit_per_call)
+            if not batch:
+                break
+            all_rows.extend(batch)
+            last_ts = batch[-1]["timestamp"]
+            if last_ts <= cursor:
+                break  # safety: no forward progress, avoid an infinite loop
+            cursor = last_ts + 1
+            if len(batch) < limit_per_call:
+                break  # caught up to the most recent available print
+        if not all_rows:
+            raise ValueError(f"ccxt returned no funding rate history for {symbol}")
+        return [{"timestamp": r["timestamp"], "funding_rate": r["fundingRate"]} for r in all_rows]
+
 
 if __name__ == "__main__":
     source = CCXTSource()

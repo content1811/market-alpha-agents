@@ -45,6 +45,12 @@ backtesting = [
   # its own virtualenv and should be installed separately when the crypto leg
   # of backtesting is built (not done in this pass -- see README).
 ]
+sentiment = [
+  "transformers>=4.40",
+  "torch>=2.2",  # CPU build is fine -- alerting/news_watch/sentiment_finbert.py only
+                 # runs single-headline-batch inference, not training. ~440MB of
+                 # weights downloaded/cached on first use (~/.cache/huggingface).
+]
 dev = [
   "pytest>=8.0",
   "pytest-cov>=5.0",
@@ -56,4 +62,5 @@ py-modules = []
 [tool.pytest.ini_options]
 markers = [
   "network: test makes real network calls to a live vendor API",
+  "model: test loads a real local ML model (e.g. FinBERT) and runs live inference -- slow, not mocked",
 ]

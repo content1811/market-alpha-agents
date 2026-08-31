@@ -54,6 +54,57 @@ def macd_histogram(closes: pd.Series, fast: int = 12, slow: int = 26, signal: in
     return MACD(closes, window_fast=fast, window_slow=slow, window_sign=signal).macd_diff()
 
 
+def trend_momentum_signal_series(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    proxy_close: pd.Series,
+    fast_ma_window: int = 20,
+    slow_ma_window: int = 50,
+    donchian_window: int = 20,
+    xsect_lookback_days: int = 252,
+) -> pd.Series:
+    """Vectorized signal_score across every date, for backtesting
+    (backtesting/run_backtest.py) -- the same formula compute_trend_momentum
+    applies to the latest bar only, applied element-wise to the whole
+    history. `proxy_close` is aligned to `close` POSITIONALLY (via a plain
+    numpy array, not index-joined) to mirror compute_trend_momentum's own use
+    of `.iloc[-xsect_lookback_days]` on both series -- that's positional, not
+    date-aligned, so the vectorized excess-return calc has to be too, or the
+    two would silently diverge whenever the two series' index labels differ."""
+    atr14 = atr(high, low, close)
+
+    fast = sma(close, fast_ma_window)
+    slow = sma(close, slow_ma_window)
+    ma_score = ((fast - slow) / atr14).clip(-1.0, 1.0)
+
+    prior_high = donchian_high(high, donchian_window)
+    donchian_raw = ((close - prior_high) / atr14).clip(-1.0, 1.0)
+    donchian_score = donchian_raw.where(close > prior_high, 0.0)
+
+    # scalar uses .iloc[-xsect_lookback_days], which on an m-bar window is
+    # position (m - xsect_lookback_days); since m = current_position + 1,
+    # that's shift(xsect_lookback_days - 1) here, not shift(xsect_lookback_days).
+    proxy_aligned = pd.Series(proxy_close.to_numpy(), index=close.index)
+    ticker_return = close / close.shift(xsect_lookback_days - 1) - 1
+    proxy_return = proxy_aligned / proxy_aligned.shift(xsect_lookback_days - 1) - 1
+    excess_return = ticker_return - proxy_return
+    xsect_score = (excess_return / 0.5).clip(-1.0, 1.0)
+
+    hist = macd_histogram(close)
+    macd_base = (hist / atr14).clip(-1.0, 1.0)
+    macd_adjustment = np.where(hist > 0, 0.1, -0.1)
+    macd_score = (macd_base + macd_adjustment).clip(-1.0, 1.0)
+
+    adx_series = adx14(high, low, close)
+    tc_series = adx_series.apply(trend_confidence)
+
+    raw = 0.3 * ma_score + 0.25 * donchian_score + 0.3 * xsect_score + 0.15 * macd_score
+    signal_score = tc_series * raw
+
+    return signal_score.clip(-1.0, 1.0)
+
+
 @dataclass
 class TrendMomentumSubScores:
     ma_score: float

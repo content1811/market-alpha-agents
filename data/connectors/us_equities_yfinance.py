@@ -41,6 +41,14 @@ class YFinanceSource(DataSource):
         df = yf.Ticker(symbol).history(period=f"{lookback_days}d", auto_adjust=True)
         if df.empty:
             raise ValueError(f"yfinance returned no data for {symbol}")
+        # The most recent bar can come back with a NaN close while today's
+        # session is still in progress/settling (observed live) -- an
+        # unusable row, not a usable one with a missing field, so it's
+        # dropped rather than passed through for a downstream z-score/BB
+        # calculation to silently turn into NaN.
+        df = df.dropna(subset=["Open", "High", "Low", "Close"])
+        if df.empty:
+            raise ValueError(f"yfinance returned only NaN bars for {symbol}")
         return self._bars_from_dataframe(symbol, df)
 
     def get_ohlcv_range(self, symbol: str, start: str, end: str) -> list[NormalizedBar]:

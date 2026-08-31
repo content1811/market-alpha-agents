@@ -9,8 +9,10 @@ from alerting.triggers import (
     composite_score_threshold,
     filing_match,
     rvol_price_spike,
+    sentiment_extreme,
     squeeze_risk_flag,
     stop_target_proximity,
+    upcoming_unlock,
 )
 
 
@@ -50,6 +52,77 @@ def test_rvol_price_spike_crypto_uses_higher_thresholds():
 def test_filing_match_severity_by_materiality():
     assert filing_match("8-K", is_material_event=True).severity == "high"
     assert filing_match("8-K", is_material_event=False).severity == "medium"
+
+
+def test_upcoming_unlock_negligible_below_both_thresholds():
+    assert upcoming_unlock(pct_of_supply=0.5, multiple_of_adv=3.0) is None
+
+
+def test_upcoming_unlock_medium_at_pct_lower_boundary():
+    alert = upcoming_unlock(pct_of_supply=2.0, multiple_of_adv=1.0)
+    assert alert is not None
+    assert alert.severity == "medium"
+
+
+def test_upcoming_unlock_medium_at_pct_upper_boundary_inclusive():
+    # 5.0% is still "medium" -- only strictly >5% is "high" (single cliff)
+    alert = upcoming_unlock(pct_of_supply=5.0, multiple_of_adv=1.0)
+    assert alert is not None
+    assert alert.severity == "medium"
+
+
+def test_upcoming_unlock_high_strictly_above_five_pct():
+    alert = upcoming_unlock(pct_of_supply=5.1, multiple_of_adv=1.0)
+    assert alert is not None
+    assert alert.severity == "high"
+
+
+def test_upcoming_unlock_medium_via_adv_multiple_strictly_above_twenty():
+    alert = upcoming_unlock(pct_of_supply=0.5, multiple_of_adv=20.1)
+    assert alert is not None
+    assert alert.severity == "medium"
+
+
+def test_upcoming_unlock_adv_multiple_at_twenty_boundary_does_not_fire_alone():
+    # 20.0x is not ">20x"; pct_of_supply=0.5 is not in [2,5] either -> no alert
+    assert upcoming_unlock(pct_of_supply=0.5, multiple_of_adv=20.0) is None
+
+
+def test_upcoming_unlock_unspecified_gap_returns_none():
+    # pct=1.0 fails "<1%"; ADV=5.0 fails "<5x" -- neither negligible nor
+    # medium/high per the plan's literal thresholds -- see docstring.
+    assert upcoming_unlock(pct_of_supply=1.0, multiple_of_adv=5.0) is None
+
+
+def test_sentiment_extreme_fires_at_low_boundary():
+    alert = sentiment_extreme(fng_value=20)
+    assert alert is not None
+    assert alert.severity == "medium"
+    assert "fear" in alert.detail.lower()
+
+
+def test_sentiment_extreme_no_fire_just_inside_low_boundary():
+    assert sentiment_extreme(fng_value=21) is None
+
+
+def test_sentiment_extreme_fires_at_high_boundary():
+    alert = sentiment_extreme(fng_value=80)
+    assert alert is not None
+    assert alert.severity == "medium"
+    assert "greed" in alert.detail.lower()
+
+
+def test_sentiment_extreme_no_fire_just_inside_high_boundary():
+    assert sentiment_extreme(fng_value=79) is None
+
+
+def test_sentiment_extreme_neutral_midrange_no_fire():
+    assert sentiment_extreme(fng_value=50) is None
+
+
+def test_sentiment_extreme_custom_thresholds():
+    assert sentiment_extreme(fng_value=30, low_threshold=30, high_threshold=70) is not None
+    assert sentiment_extreme(fng_value=30, low_threshold=20, high_threshold=70) is None
 
 
 def test_dedup_blocks_within_cooldown_then_allows_after():
